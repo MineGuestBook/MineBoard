@@ -1,5 +1,5 @@
 config:
   pulumi-prj:accountId: 3b7f09ab1c9fbe248bdb4cdfd67cb8b6
   pulumi-prj:domain: nicolaspitz.dev
-  pulumi-prj:subdomain: dev
+  pulumi-prj:subdomain: preview-prod
   pulumi-prj:zoneId: bb592384462f132dc22c112697f29ab6
