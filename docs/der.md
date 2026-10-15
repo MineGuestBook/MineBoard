@@ -1,6 +1,6 @@
-# GuestBook — Diagrama Entidade-Relacionamento (DER)
+# GuestBook — Diagrama Entidade-Relacionamento e Modelagem de Dados
 
-Este documento especifica a modelagem de dados do **GuestBook**, detalhando o Diagrama Entidade-Relacionamento (DER), o dicionário de dados, as regras de negócio refletidas no esquema e o script DDL para o banco de dados **Cloudflare D1** (SQLite serverless na borda).
+Este documento especifica a modelagem de dados do **GuestBook**. Contém a modelagem conceitual (DER), a modelagem orientada a documentos para **MongoDB Atlas** (adotada para atender aos requisitos de alta concorrência e testes de escalabilidade) e o esquema relacional SQL de referência.
 
 ---
 
@@ -10,8 +10,8 @@ O modelo de dados foi desenhado para atender às características fundamentais d
 
 1. **Assimetria de acesso:** Apenas donos de perfil possuem contas autenticadas. Comentários e curtidas são abertos ao público e não exigem conta de usuário (RF10, RN6).
 2. **Separação entre Credenciais e Perfil Público:** Dados sensíveis de autenticação (`users`, `sessions`, `password_reset_tokens`) são isolados dos dados de exibição pública (`profiles`).
-3. **Integridade em Cascata:** A exclusão de uma conta remove automaticamente o perfil e todos os comentários e curtidas associados (RF4, RN3, RN10).
-4. **Compatibilidade com Cloudflare D1 (SQLite):** Tipagem aderente ao SQLite (`TEXT` para UUIDs, strings e timestamps ISO 8601; `INTEGER` para números e flags).
+3. **Integridade e Consistência:** A exclusão de uma conta remove automaticamente o perfil e todos os comentários e curtidas associados (RF4, RN3, RN10).
+4. **Alta Escalabilidade com MongoDB Atlas:** Uso de coleções com índices adequados e atomicidade de documentos para suportar testes de estresse e carga de alta concorrência sem bloqueio de escrita.
 
 ---
 
@@ -230,9 +230,141 @@ Armazena tokens de recuperação temporários para redefinição de senha esquec
 
 ---
 
-## 6. Script DDL Completo (Cloudflare D1 / SQLite)
+## 6. Modelagem de Dados para MongoDB Atlas (NoSQL / Documentos)
 
-O script SQL a seguir pode ser executado diretamente através do utilitário `wrangler d1 execute`:
+Para atender aos testes de estresse e escalabilidade da disciplina, a camada de persistência utiliza o **MongoDB Atlas**. A modelagem em documentos aproveita o poder de operações atômicas em nível de documento (`$inc`, `$addToSet`), índices TTL nativos para expiração de sessões e desnormalização estratégica de contadores de likes.
+
+### 6.1 Coleção: `users`
+Armazena credenciais e dados de identificação da conta.
+
+```json
+{
+  "_id": ObjectId("670cb1e2..."),
+  "email": "usuario@exemplo.com",
+  "password_hash": "$argon2id$...",
+  "auth_provider": "local",
+  "auth_provider_id": null,
+  "created_at": ISODate("2026-10-15T00:00:00Z"),
+  "updated_at": ISODate("2026-10-15T00:00:00Z")
+}
+```
+**Índices essenciais:**
+```javascript
+db.users.createIndex({ email: 1 }, { unique: true, collation: { locale: "en", strength: 2 } });
+db.users.createIndex({ auth_provider: 1, auth_provider_id: 1 });
+```
+
+### 6.2 Coleção: `profiles`
+Armazena as informações públicas da página do guestbook, associada 1:1 ao usuário.
+
+```json
+{
+  "_id": ObjectId("670cb2a1..."),
+  "user_id": ObjectId("670cb1e2..."),
+  "username": "joaosilva",
+  "display_name": "João Silva",
+  "bio": "Desenvolvedor apaixonado por web retro",
+  "avatar_url": "https://r2.xxxxx.com/avatars/user123.webp",
+  "theme_config": {
+    "background_color": "#121212",
+    "card_background": "#1e1e1e",
+    "text_color": "#e0e0e0",
+    "accent_color": "#00ffcc",
+    "font_family": "monospace"
+  },
+  "created_at": ISODate("2026-10-15T00:00:00Z"),
+  "updated_at": ISODate("2026-10-15T00:00:00Z")
+}
+```
+**Índices essenciais:**
+```javascript
+db.profiles.createIndex({ user_id: 1 }, { unique: true });
+db.profiles.createIndex({ username: 1 }, { unique: true, collation: { locale: "en", strength: 2 } });
+```
+
+### 6.3 Coleção: `comments`
+Armazena os comentários recebidos por cada perfil. Para garantir **alta taxa de escrita sob teste de estresse**, as curtidas e o total de likes são embutidos no próprio comentário, permitindo inserções e curtidas atômicas sem lock de banco ou joins.
+
+```json
+{
+  "_id": ObjectId("670cb3c4..."),
+  "profile_id": ObjectId("670cb2a1..."),
+  "author_name": "Visitante Anônimo",
+  "author_email": "contato@visitante.com",
+  "content": "Parabéns pelo projeto! Ficou muito bom.",
+  "ip_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "likes_count": 3,
+  "liked_by": [
+    "fingerprint_hash_1",
+    "fingerprint_hash_2"
+  ],
+  "created_at": ISODate("2026-10-15T00:05:00Z")
+}
+```
+**Mapeamento de Regras de Negócio no MongoDB:**
+- **Dar Like (RN9):** Atualização atômica em 1 única operação sem lock geral:
+  ```javascript
+  db.comments.updateOne(
+    { _id: commentId, liked_by: { $ne: fingerprint } },
+    { $addToSet: { liked_by: fingerprint }, $inc: { likes_count: 1 } }
+  );
+  ```
+- **Remover Like:**
+  ```javascript
+  db.comments.updateOne(
+    { _id: commentId, liked_by: fingerprint },
+    { $pull: { liked_by: fingerprint }, $inc: { likes_count: -1 } }
+  );
+  ```
+
+**Índices essenciais:**
+```javascript
+db.comments.createIndex({ profile_id: 1, created_at: -1 });
+db.comments.createIndex({ ip_hash: 1, created_at: -1 });
+```
+
+### 6.4 Coleção: `sessions`
+Controla os cookies de sessão autenticada. Utiliza **índice TTL (Time-To-Live)** nativo do MongoDB para auto-expiração de sessões.
+
+```json
+{
+  "_id": "token_criptografico_hex_ou_uuid",
+  "user_id": ObjectId("670cb1e2..."),
+  "expires_at": ISODate("2026-10-22T00:00:00Z"),
+  "created_at": ISODate("2026-10-15T00:00:00Z")
+}
+```
+**Índices essenciais:**
+```javascript
+db.sessions.createIndex({ user_id: 1 });
+// O MongoDB expira e apaga o documento automaticamente no momento indicado por expires_at
+db.sessions.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 });
+```
+
+### 6.5 Coleção: `password_reset_tokens`
+Tokens para redefinição de senha esquecida (RF6, RN4), também com expiração TTL automática.
+
+```json
+{
+  "_id": ObjectId("..."),
+  "user_id": ObjectId("670cb1e2..."),
+  "token_hash": "sha256_do_token",
+  "expires_at": ISODate("2026-10-15T01:00:00Z"),
+  "used_at": null,
+  "created_at": ISODate("2026-10-15T00:00:00Z")
+}
+```
+**Índices essenciais:**
+```javascript
+db.password_reset_tokens.createIndex({ token_hash: 1 }, { unique: true });
+db.password_reset_tokens.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 });
+```
+
+---
+
+## 7. Script DDL SQL de Referência (Esquema Relacional Inicial)
+
+O script SQL a seguir documenta a modelagem relacional inicial elaborada antes da migração para o cluster NoSQL MongoDB Atlas:
 
 ```sql
 -- Habilitar integridade de chaves estrangeiras no SQLite

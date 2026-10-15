@@ -1,0 +1,5 @@
+# Copie este arquivo para .dev.vars e preencha com suas credenciais do MongoDB Atlas
+# O arquivo .dev.vars é lido automaticamente pelo `wrangler dev` e está no .gitignore
+
+MONGODB_URI=mongodb+srv://<usuario>:<senha>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+DATABASE_NAME=guestbook

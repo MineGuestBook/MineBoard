@@ -1,0 +1,22 @@
+# Python / Pulumi
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.log
+
+# Node / Cloudflare Workers
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+dist/
+coverage/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
