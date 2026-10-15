@@ -4,17 +4,31 @@ export interface Env {
   MONGODB_URI: string;
   DATABASE_NAME?: string;
   NODE_ENV?: string;
+  ROOT_DOMAIN?: string;
+  RATE_LIMIT_MAX_PER_MINUTE?: string;
 }
 
 let cachedClient: MongoClient | null = null;
 let cachedDb: Db | null = null;
+let testDbOverride: Db | null = null;
+
+/**
+ * Permite injetar uma instância de banco (mock/in-memory) durante a execução de testes no Vitest.
+ */
+export function setTestDatabase(db: Db | null): void {
+  testDbOverride = db;
+}
 
 /**
  * Obtém a conexão com o MongoDB Atlas.
  * No Cloudflare Workers, a conexão é reaproveitada entre requisições no mesmo isolate,
  * reduzindo a latência de handshake TLS e evitando estourar o pool de conexões.
  */
-export async function getDatabase(env: Env): Promise<{ client: MongoClient; db: Db }> {
+export async function getDatabase(env: Env): Promise<{ client: MongoClient | null; db: Db }> {
+  if (testDbOverride) {
+    return { client: null, db: testDbOverride };
+  }
+
   if (cachedClient && cachedDb) {
     return { client: cachedClient, db: cachedDb };
   }
