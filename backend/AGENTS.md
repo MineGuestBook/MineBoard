@@ -1,62 +1,41 @@
-# Cloudflare Workers
+# Backend — GuestBook API
 
-STOP. Your knowledge of Cloudflare Workers APIs and limits may be outdated. Always retrieve current documentation before any Workers, KV, R2, D1, Durable Objects, Queues, Vectorize, AI, or Agents SDK task.
+## Stack
+- **Runtime:** Cloudflare Workers (`nodejs_compat`, `compatibility_date: 2026-10-01`)
+- **HTTP Framework:** Hono v4
+- **Database:** MongoDB Atlas (driver oficial `mongodb`, lazy-loaded)
+- **Testes:** Vitest + `@cloudflare/vitest-plugin`
+- **IaC:** Pulumi Python (em `/pulumi-prj`)
 
-## Docs
+## Arquitetura de Arquivos
+- `src/index.ts`: Entrypoint do Worker, middleware CORS, rotas base (`/health`, `/api/setup/indexes`).
+- `src/db.ts`: Gerenciamento de conexão com MongoDB Atlas (reúso de isolate, `maxPoolSize: 5`, `ensureIndexes`).
+- `src/types.ts`: Interfaces TypeScript das coleções de dados.
+- `wrangler.jsonc`: Configuração do Worker e flags de compatibilidade.
+- `.dev.vars`: Variáveis de ambiente locais (`MONGODB_URI`, `DATABASE_NAME`). Ignorado no Git.
 
-- https://developers.cloudflare.com/workers/
-- MCP: `https://docs.mcp.cloudflare.com/mcp`
+## Modelagem de Dados (MongoDB Atlas)
+- **`users`**: Contas e credenciais. Índices: `email` (único, case-insensitive), `{ auth_provider, auth_provider_id }`.
+- **`profiles`**: Páginas de guestbook (1:1 com `users`). Índices: `user_id` (único), `username` (único, case-insensitive).
+- **`comments`**: Comentários por `profile_id`. Contém `likes_count` e array `liked_by` (fingerprints). Índices: `{ profile_id, created_at: -1 }`, `{ ip_hash, created_at: -1 }`.
+- **`sessions`**: Tokens de sessão. Índice TTL: `{ expires_at: 1 }` (`expireAfterSeconds: 0`).
+- **`password_reset_tokens`**: Tokens de recuperação com índice TTL.
 
-For all limits and quotas, retrieve from the product's `/platform/limits/` page. eg. `/workers/platform/limits`
+## Regras Técnicas do Runtime
+1. **Serverless Connection Pooling:** Conexão MongoDB mantida em escopo global (`cachedClient`) para reuso dentro do mesmo isolate.
+2. **Likes Concorrentes:** Operação atômica em `comments` via `$addToSet` e `$inc` para evitar locks e race conditions em testes de estresse.
+3. **Subdomínios:** Roteamento baseado no header `Host` (`*.dominio.com` -> perfil, raiz -> app).
+4. **Sessões:** Cookie `HttpOnly; Domain=.dominio.com; SameSite=Lax`.
 
-## Commands
+## Comandos Principais
+```bash
+npm run dev          # Iniciar servidor local (http://localhost:8787)
+npm test             # Executar testes unitários com Vitest
+npm run cf-typegen   # Regenerar definições de tipos do Worker
+npx wrangler deploy  # Publicar Worker na Cloudflare
+```
 
-| Command | Purpose |
-|---------|---------|
-| `npx wrangler dev` | Local development |
-| `npx wrangler deploy` | Deploy to Cloudflare |
-| `npx wrangler types` | Generate TypeScript types |
-
-Run `wrangler types` after changing bindings in wrangler.jsonc.
-
-## Local Explorer (Debugging & Inspection)
-
-When running `npx wrangler dev`, a Local Explorer API is available for inspecting and debugging local Workers, bindings, and storage state. The API base URL is printed in the terminal when the dev server starts.
-
-Key endpoints (relative to the dev server URL):
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /cdn-cgi/local/explorer/api/local/workers` | List local Workers and their bindings |
-| `GET /cdn-cgi/local/explorer/api/storage/kv/namespaces` | List KV namespaces |
-| `GET /cdn-cgi/local/explorer/api/d1/database` | List D1 databases |
-| `GET /cdn-cgi/local/explorer/api/r2/buckets` | List R2 buckets |
-| `GET /cdn-cgi/local/explorer/api/workers/durable_objects/namespaces` | List Durable Object namespaces |
-| `GET /cdn-cgi/local/explorer/api/workflows` | List Workflows |
-| `POST /cdn-cgi/local/explorer/api/local/observability/query` | Run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: `spans`, `logs` (read attributes via `json(attributes)`). Example: `curl -X POST <base>/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'` |
-| `POST /cdn-cgi/local/explorer/api/local/observability/clear` | Clear all captured traces and logs |
-
-If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort): `GET /cdn-cgi/local/explorer/api`
-
-Use the Local Explorer to debug issues by inspecting storage state (KV keys, D1 rows, R2 objects, DO storage), viewing Worker bindings, and querying request traces and logs captured during the dev session.
-
-## Node.js Compatibility
-
-https://developers.cloudflare.com/workers/runtime-apis/nodejs/
-
-## Errors
-
-- **Error 1102** (CPU/Memory exceeded): Retrieve limits from `/workers/platform/limits/`
-- **All errors**: https://developers.cloudflare.com/workers/observability/errors/
-
-## Product Docs
-
-Retrieve API references and limits from:
-`/kv/` · `/r2/` · `/d1/` · `/durable-objects/` · `/queues/` · `/vectorize/` · `/workers-ai/` · `/agents/`
-
-## Best Practices (conditional)
-
-If the application uses Durable Objects or Workflows, refer to the relevant best practices:
-
-- Durable Objects: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
-- Workflows: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
+## Endpoints Atuais
+- `GET /`: Retorno de texto simples.
+- `GET /health`: Estado do Worker e status de conexão com MongoDB.
+- `POST /api/setup/indexes`: Criação idempotente de índices e coleções no MongoDB.
