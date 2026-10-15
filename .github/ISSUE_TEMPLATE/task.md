@@ -6,18 +6,18 @@ labels: "chore"
 assignees: ''
 ---
 
-## 🛠️ Descrição da Tarefa
+## Descrição da Tarefa
 <!-- Descreva o objetivo técnico a ser alcançado. -->
 
-## 📋 Checklist de Execução
+## Checklist de Execução
 - [ ] 
 - [ ] 
 - [ ] 
 
-## 🎯 Critérios de Conclusão e Qualidade
+## Critérios de Conclusão e Qualidade
 - [ ] Testes unitários/integração cobrindo a alteração continuam passando 100%.
 - [ ] Checagem de tipos TypeScript sem erros (`npm run typecheck`).
 - [ ] Nenhuma asserção de teste flexibilizada ou removida.
 
-## 🔗 Dependências e Referências
+## Dependências e Referências
 <!-- Issues relacionadas, PRs anteriores ou documentação. -->

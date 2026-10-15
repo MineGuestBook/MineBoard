@@ -1,11 +1,11 @@
-## 📋 Descrição do Pull Request
+## Descrição do Pull Request
 <!-- Descreva de forma clara e objetiva o que este PR implementa ou corrige. -->
 
-## 🔗 Issue Relacionada
+## Issue Relacionada
 <!-- Vincule a issue correspondente para fechamento automático ao fazer merge. Ex: Closes #12, Fixes #34 -->
 Closes #
 
-## 🏷️ Tipo de Alteração
+## Tipo de Alteração
 - [ ] `feat`: Nova funcionalidade
 - [ ] `fix`: Correção de bug
 - [ ] `docs`: Documentação técnica ou guias
@@ -14,7 +14,7 @@ Closes #
 
 ---
 
-## 🛡️ Checklist de Qualidade e Integridade (Obrigatório)
+## Checklist de Qualidade e Integridade (Obrigatório)
 > **Atenção:** Em nenhuma hipótese testes automatizados ou smoke tests devem ser alterados, enfraquecidos ou ignorados apenas para forçar a passagem de uma implementação com defeito.
 
 - [ ] Executei a checagem de tipos e não há erros de tipagem (`npm run typecheck` no backend).
@@ -25,7 +25,7 @@ Closes #
 
 ---
 
-## 🧪 Como Validar Manualmente
+## Como Validar Manualmente
 <!-- Descreva comandos, payloads de exemplo (curl / postman) ou passos para reproduzir o teste. -->
 ```bash
 # Exemplo de chamada para teste
