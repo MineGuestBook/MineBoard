@@ -1,4 +1,4 @@
-import { ObjectId } from 'mongodb';
+import type { ObjectId } from 'bson';
 
 export interface User {
   _id?: ObjectId;

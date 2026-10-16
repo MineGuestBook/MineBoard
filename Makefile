@@ -20,3 +20,5 @@ dev-backend:
 test-backend:
 	cd backend && npm test -- --run
 
+demo-backend:
+	bash backend/scripts/demo-requests.sh
