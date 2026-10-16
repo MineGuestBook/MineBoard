@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ObjectId } from "bson";
 import type { Db } from "mongodb";
 import worker from "../src/index";
-import { setTestDatabase } from "../src/db";
+import { setTestDatabase, getMongoConnectionOptions } from "../src/db";
 import {
 	sanitizeText,
 	validateUsername,
@@ -310,5 +310,87 @@ describe("GuestBook API — Profiles, Comments, Likes & Subdomain Integration", 
 
 		const getAfterDel = await SELF.fetch("https://example.com/api/profiles/anaclara");
 		expect(getAfterDel.status).toBe(404);
+	});
+});
+
+describe("Regression Tests — Bug Prevention & Serverless Robustness", () => {
+	beforeEach(() => {
+		setTestDatabase(createInMemoryMongoDb());
+	});
+
+	afterEach(() => {
+		setTestDatabase(null);
+	});
+
+	it("regression: enforces serverless connection pool safety (maxPoolSize: 1, minPoolSize: 0)", () => {
+		const opts = getMongoConnectionOptions();
+		expect(opts.maxPoolSize).toBe(1);
+		expect(opts.minPoolSize).toBe(0);
+		expect(opts.serverSelectionTimeoutMS).toBeLessThanOrEqual(5000);
+		expect(opts.connectTimeoutMS).toBeLessThanOrEqual(5000);
+	});
+
+	it("regression: rejects underscores and non-DNS characters in usernames (RFC 1123 compliance)", async () => {
+		// Garante que o bug 'visitante_1792110475' com underscore nunca seja aceito
+		expect(validateUsername("visitante_1792110475").valid).toBe(false);
+		expect(validateUsername("user.name").valid).toBe(false);
+		expect(validateUsername("user@name").valid).toBe(false);
+		expect(validateUsername("user name").valid).toBe(false);
+		expect(validateUsername("-leadinghyphen").valid).toBe(false);
+		expect(validateUsername("trailinghyphen-").valid).toBe(false);
+
+		// Garante que o formato correto com hífen seja sempre aceito
+		expect(validateUsername("visitante-1792110475").valid).toBe(true);
+
+		// Valida rejeição na camada de API com HTTP 400
+		const res = await SELF.fetch("https://example.com/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "teste@exemplo.com",
+				username: "visitante_invalido",
+				display_name: "Teste",
+			}),
+		});
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as Record<string, any>;
+		expect(body.error).toContain("apenas letras minúsculas, números e hifens");
+	});
+
+	it("regression: handles rapid consecutive requests without isolate promise deadlocks", async () => {
+		// Dispara 5 requisições rápidas consecutivas para garantir que o isolate não congele
+		const requests = Array.from({ length: 5 }, (_, i) =>
+			SELF.fetch("https://example.com/api/profiles", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					email: `concurrency-${i}@exemplo.com`,
+					username: `user-conc-${i}`,
+					display_name: `User ${i}`,
+				}),
+			})
+		);
+
+		const responses = await Promise.all(requests);
+		for (const r of responses) {
+			expect(r.status).toBe(201);
+		}
+	});
+
+	it("regression: guarantees XSS protection on nested script and image tags", async () => {
+		const res = await SELF.fetch("https://example.com/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "sec@exemplo.com",
+				username: "sec-user",
+				display_name: "<b>User</b>",
+				bio: "<script src='evil.js'></script>",
+			}),
+		});
+		expect(res.status).toBe(201);
+		const profile = ((await res.json()) as Record<string, any>).profile;
+		expect(profile.display_name).toBe("&lt;b&gt;User&lt;/b&gt;");
+		expect(profile.bio).toBe("&lt;script src=&#39;evil.js&#39;&gt;&lt;/script&gt;");
 	});
 });
