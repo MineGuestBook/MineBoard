@@ -8,8 +8,6 @@ export interface Env {
   RATE_LIMIT_MAX_PER_MINUTE?: string;
 }
 
-let cachedClient: MongoClient | null = null;
-let cachedDb: Db | null = null;
 let testDbOverride: Db | null = null;
 
 /**
