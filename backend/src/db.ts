@@ -29,27 +29,21 @@ export async function getDatabase(env: Env): Promise<{ client: MongoClient | nul
     return { client: null, db: testDbOverride };
   }
 
-  if (cachedClient && cachedDb) {
-    return { client: cachedClient, db: cachedDb };
-  }
-
   if (!env.MONGODB_URI) {
     throw new Error('Variável MONGODB_URI não configurada. Defina no .dev.vars (local) ou em Secrets (produção).');
   }
 
   const { MongoClient } = await import('mongodb');
   const client = new MongoClient(env.MONGODB_URI, {
-    maxPoolSize: 5, // Ideal para ambientes serverless
+    maxPoolSize: 1,
+    minPoolSize: 0,
     serverSelectionTimeoutMS: 5000,
-    connectTimeoutMS: 10000,
+    connectTimeoutMS: 5000,
   });
 
   await client.connect();
   const dbName = env.DATABASE_NAME || 'guestbook';
   const db = client.db(dbName);
-
-  cachedClient = client;
-  cachedDb = db;
 
   return { client, db };
 }

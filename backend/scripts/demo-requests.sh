@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BASE_URL="${1:-http://localhost:8787}"
-DEMO_USER="visitante_$(date +%s)"
+DEMO_USER="visitante-$(date +%s)"
 
 echo "============================================================"
 echo " GuestBook — Demonstração SAM (Cloudflare Workers + MongoDB)"
