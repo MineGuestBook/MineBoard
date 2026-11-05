@@ -394,3 +394,311 @@ describe("Regression Tests — Bug Prevention & Serverless Robustness", () => {
 		expect(profile.bio).toBe("&lt;script src=&#39;evil.js&#39;&gt;&lt;/script&gt;");
 	});
 });
+
+
+describe("Authentication, Sessions (RN16), Password Reset (UC04/UC05) & Ownership (RN8)", () => {
+	let testDb: Db;
+
+	beforeEach(() => {
+		testDb = createInMemoryMongoDb();
+		setTestDatabase(testDb);
+	});
+
+	afterEach(() => {
+		setTestDatabase(null);
+	});
+
+	it("authenticates automatically on registration (UC01), supports login/logout, and enforces ownership (RN8)", async () => {
+		// 1. Criar conta com senha (UC01) -> emite session_token e cookie com Domain=.nicolaspitz.dev (RN16)
+		const regOwner = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "dono@exemplo.com",
+				username: "donoperfil",
+				display_name: "Dono do Perfil",
+				password: "senhaSegura123",
+			}),
+		});
+		expect(regOwner.status).toBe(201);
+		const setCookieHeader = regOwner.headers.get("Set-Cookie") || "";
+		expect(setCookieHeader).toContain("Domain=.nicolaspitz.dev");
+		expect(setCookieHeader).toContain("HttpOnly");
+		const ownerData = (await regOwner.json()) as Record<string, any>;
+		expect(ownerData.session_token).toBeTruthy();
+		const ownerToken = ownerData.session_token as string;
+
+		// 2. Criar segunda conta (intruso)
+		const regIntruder = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "intruso@exemplo.com",
+				username: "intruso",
+				display_name: "Intruso",
+				password: "outraSenha123",
+			}),
+		});
+		expect(regIntruder.status).toBe(201);
+		const intruderData = (await regIntruder.json()) as Record<string, any>;
+		const intruderToken = intruderData.session_token as string;
+
+		// 3. Visitante publica comentário no perfil do dono (RF10, RF15)
+		const commentRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil/comments", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				author_name: "Visitante",
+				content: "Recado importante!",
+			}),
+		});
+		expect(commentRes.status).toBe(201);
+		const commentBody = (await commentRes.json()) as Record<string, any>;
+		expect(commentBody.owner_notified).toBe(true);
+		const commentId = commentBody.comment.id as string;
+
+		// 4. Sem token: bloquear edição/exclusão de conta protegida por senha (401)
+		const unauthPatch = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ bio: "Hackeado" }),
+		});
+		expect(unauthPatch.status).toBe(401);
+
+		const unauthDelComment = await SELF.fetch(`https://nicolaspitz.dev/api/comments/${commentId}`, {
+			method: "DELETE",
+		});
+		expect(unauthDelComment.status).toBe(401);
+
+		// 5. Com token de outro usuário (intruso): bloquear com 403 Forbidden (RN8)
+		const forbiddenPatch = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil", {
+			method: "PATCH",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${intruderToken}`,
+			},
+			body: JSON.stringify({ bio: "Hackeado pelo intruso" }),
+		});
+		expect(forbiddenPatch.status).toBe(403);
+
+		const forbiddenDelComment = await SELF.fetch(`https://nicolaspitz.dev/api/comments/${commentId}`, {
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${intruderToken}` },
+		});
+		expect(forbiddenDelComment.status).toBe(403);
+
+		// 6. Com token do próprio dono: permitir edição de perfil (UC02) e exclusão de comentário (UC09, RN8)
+		const ownerPatch = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil", {
+			method: "PATCH",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${ownerToken}`,
+			},
+			body: JSON.stringify({
+				bio: "Bio oficial atualizada",
+				theme_config: {
+					background_color: "#001122",
+					accent_color: "#ff00aa",
+					font_family: "Courier New",
+					malicious_key: "expression(alert(1))",
+				},
+			}),
+		});
+		expect(ownerPatch.status).toBe(200);
+		const patchedProfile = ((await ownerPatch.json()) as Record<string, any>).profile;
+		expect(patchedProfile.bio).toBe("Bio oficial atualizada");
+		expect(patchedProfile.theme_config.background_color).toBe("#001122");
+		expect(patchedProfile.theme_config.malicious_key).toBeUndefined();
+
+		const ownerDelComment = await SELF.fetch(`https://nicolaspitz.dev/api/comments/${commentId}`, {
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(ownerDelComment.status).toBe(200);
+
+		// 7. Consultar /api/auth/me, fazer logout e fazer login novamente
+		const meRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/me", {
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(meRes.status).toBe(200);
+		const meBody = (await meRes.json()) as Record<string, any>;
+		expect(meBody.authenticated).toBe(true);
+		expect(meBody.profile.username).toBe("donoperfil");
+
+		const logoutRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/logout", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(logoutRes.status).toBe(200);
+
+		const meAfterLogout = await SELF.fetch("https://nicolaspitz.dev/api/auth/me", {
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(meAfterLogout.status).toBe(401);
+
+		const loginRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/login", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "dono@exemplo.com",
+				password: "senhaSegura123",
+			}),
+		});
+		expect(loginRes.status).toBe(200);
+		const loginBody = (await loginRes.json()) as Record<string, any>;
+		expect(loginBody.session_token).toBeTruthy();
+	});
+
+	it("supports password change (UC04, RN5) and single-use password reset token flow (UC05, RN4)", async () => {
+		const regRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "recuperar@exemplo.com",
+				username: "user-senha",
+				display_name: "User Senha",
+				password: "senhaInicial123",
+			}),
+		});
+		expect(regRes.status).toBe(201);
+		const { session_token: token } = (await regRes.json()) as Record<string, any>;
+
+		// 1. Alterar senha permitindo senha igual à anterior (RN5)
+		const samePassRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/change-password", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+			body: JSON.stringify({
+				current_password: "senhaInicial123",
+				new_password: "senhaInicial123",
+			}),
+		});
+		expect(samePassRes.status).toBe(200);
+
+		// 2. Rejeitar senha atual incorreta (UC04)
+		const wrongPassRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/change-password", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+			body: JSON.stringify({
+				current_password: "senhaErrada999",
+				new_password: "novaSenha456",
+			}),
+		});
+		expect(wrongPassRes.status).toBe(403);
+
+		// 3. Solicitar recuperação de senha (UC05)
+		const forgotRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/forgot-password", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ email: "recuperar@exemplo.com" }),
+		});
+		expect(forgotRes.status).toBe(200);
+
+		// 4. Testar redefinição com token conhecido inserido na coleção password_reset_tokens (RN4)
+		const userDoc = await testDb.collection("users").findOne({ email: "recuperar@exemplo.com" });
+		expect(userDoc).toBeTruthy();
+
+		const rawResetToken = "token-unico-recuperacao-123456";
+		const encoder = new TextEncoder();
+		const hashBuf = await crypto.subtle.digest("SHA-256", encoder.encode(rawResetToken));
+		const tokenHash = Array.from(new Uint8Array(hashBuf))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+
+		await testDb.collection("password_reset_tokens").insertOne({
+			user_id: userDoc!._id,
+			token_hash: tokenHash,
+			expires_at: new Date(Date.now() + 3600_000),
+			used_at: null,
+			created_at: new Date(),
+		});
+
+		const resetRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/reset-password", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				token: rawResetToken,
+				new_password: "senhaRedefinida789",
+			}),
+		});
+		expect(resetRes.status).toBe(200);
+
+		// 5. Garantir que o mesmo token não pode ser reutilizado (RN4)
+		const reuseRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/reset-password", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				token: rawResetToken,
+				new_password: "outraTentativa789",
+			}),
+		});
+		expect(reuseRes.status).toBe(400);
+
+		// 6. Login com a nova senha funciona
+		const loginNew = await SELF.fetch("https://nicolaspitz.dev/api/auth/login", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "recuperar@exemplo.com",
+				password: "senhaRedefinida789",
+			}),
+		});
+		expect(loginNew.status).toBe(200);
+	});
+
+	it("serves embeddable widget script/iframe (RF14, UC10), R2 avatar upload (RF3) and OpenAPI spec", async () => {
+		const regRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "widget@exemplo.com",
+				username: "retro-widget",
+				display_name: "Retro Widget",
+				password: "senhaSegura123",
+			}),
+		});
+		expect(regRes.status).toBe(201);
+		const { session_token: token } = (await regRes.json()) as Record<string, any>;
+
+		// 1. Widget script (embed.js) e iframe HTML (frame)
+		const scriptRes = await SELF.fetch("https://nicolaspitz.dev/api/widget/retro-widget/embed.js");
+		expect(scriptRes.status).toBe(200);
+		expect(scriptRes.headers.get("Content-Type")).toContain("application/javascript");
+		expect(await scriptRes.text()).toContain("retro-widget");
+
+		const frameRes = await SELF.fetch("https://nicolaspitz.dev/api/widget/retro-widget/frame");
+		expect(frameRes.status).toBe(200);
+		expect(await frameRes.text()).toContain("GuestBook de Retro Widget");
+
+		// 2. Upload de avatar no R2 (RF3)
+		const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+		const avatarRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles/retro-widget/avatar", {
+			method: "POST",
+			headers: {
+				"Content-Type": "image/png",
+				Authorization: `Bearer ${token}`,
+			},
+			body: pngBytes,
+		});
+		expect(avatarRes.status).toBe(200);
+		const avatarData = (await avatarRes.json()) as Record<string, any>;
+		expect(avatarData.avatar_url).toContain("/api/avatars/");
+
+		// Buscar o avatar recém-enviado
+		const getAvatarRes = await SELF.fetch(avatarData.avatar_url);
+		expect(getAvatarRes.status).toBe(200);
+		expect(getAvatarRes.headers.get("Content-Type")).toBe("image/png");
+
+		// 3. Especificação OpenAPI 3.0
+		const openApiRes = await SELF.fetch("https://nicolaspitz.dev/api/openapi.json");
+		expect(openApiRes.status).toBe(200);
+		const spec = (await openApiRes.json()) as Record<string, any>;
+		expect(spec.openapi).toBe("3.0.3");
+		expect(spec.paths["/api/auth/login"]).toBeDefined();
+	});
+});

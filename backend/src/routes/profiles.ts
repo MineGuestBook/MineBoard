@@ -4,32 +4,61 @@ import type { Db } from 'mongodb';
 import { Env, getDatabase } from '../db';
 import { Profile, ProfileThemeConfig, User, Comment } from '../types';
 import {
-  hashSha256,
+  getClientIdentity,
+  hashPassword,
+  isSafeAvatarUrl,
+  isSafeColor,
+  isSafeFontFamily,
+  isValidEmail,
   normalizeUsername,
   sanitizeText,
+  validatePassword,
   validateUsername,
 } from '../utils/security';
+import { authorizeProfileOwner, createSessionForUser } from '../utils/session';
+import { logAuditEvent } from '../utils/audit';
 
 export const profilesRouter = new Hono<{ Bindings: Env }>();
 
-const ALLOWED_THEME_KEYS = new Set([
-  'background_color',
-  'card_background',
-  'text_color',
-  'accent_color',
-  'font_family',
-]);
+const COLOR_THEME_KEYS = ['background_color', 'card_background', 'text_color', 'accent_color'] as const;
 
-function sanitizeThemeConfig(raw: unknown): ProfileThemeConfig | undefined {
+export const DEFAULT_THEME: ProfileThemeConfig = {
+  background_color: '#121212',
+  card_background: '#1e1e1e',
+  text_color: '#e0e0e0',
+  accent_color: '#00ffcc',
+  font_family: 'monospace',
+};
+
+export const MAX_DISPLAY_NAME_LENGTH = 80;
+export const MAX_BIO_LENGTH = 500;
+
+export const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+export const AVATAR_CONTENT_TYPES: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+/**
+ * Mantém apenas chaves de tema permitidas com valores seguros (RF8, RNF5):
+ * cores hexadecimais e fontes de uma lista fechada, impedindo injeção de CSS.
+ */
+export function sanitizeThemeConfig(raw: unknown): ProfileThemeConfig | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return undefined;
   }
 
+  const input = raw as Record<string, unknown>;
   const sanitized: ProfileThemeConfig = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (ALLOWED_THEME_KEYS.has(key) && typeof value === 'string') {
-      sanitized[key] = sanitizeText(value).slice(0, 64);
+  for (const key of COLOR_THEME_KEYS) {
+    if (isSafeColor(input[key])) {
+      sanitized[key] = (input[key] as string).trim();
     }
+  }
+  if (isSafeFontFamily(input.font_family)) {
+    sanitized.font_family = (input.font_family as string).trim();
   }
   return sanitized;
 }
@@ -89,13 +118,68 @@ export async function findProfileWithComments(
 }
 
 /**
+ * Cria conta (`users`) + perfil 1:1 (`profiles`) — usado pelo cadastro local e pelo OAuth (RN1).
+ */
+export async function createAccountWithProfile(
+  db: Db,
+  data: {
+    email: string;
+    username: string;
+    displayName: string;
+    passwordHash: string | null;
+    authProvider: User['auth_provider'];
+    authProviderId: string | null;
+    bio?: string;
+    avatarUrl?: string;
+    themeConfig?: ProfileThemeConfig;
+  }
+): Promise<{ user: User; profile: Profile }> {
+  const now = new Date();
+  const userId = new ObjectId();
+  const profileId = new ObjectId();
+
+  const user: User = {
+    _id: userId,
+    email: data.email,
+    password_hash: data.passwordHash,
+    auth_provider: data.authProvider,
+    auth_provider_id: data.authProviderId,
+    created_at: now,
+    updated_at: now,
+  };
+
+  const profile: Profile = {
+    _id: profileId,
+    user_id: userId,
+    username: data.username,
+    display_name: data.displayName,
+    bio: data.bio,
+    avatar_url: data.avatarUrl,
+    theme_config: { ...DEFAULT_THEME, ...(data.themeConfig || {}) },
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.collection<User>('users').insertOne(user);
+  try {
+    await db.collection<Profile>('profiles').insertOne(profile);
+  } catch (err) {
+    // Mantém a regra 1:1 (RN1): desfaz a conta caso o perfil não possa ser criado
+    await db.collection<User>('users').deleteOne({ _id: userId });
+    throw err;
+  }
+
+  return { user, profile };
+}
+
+/**
  * GET /api/profiles
  * Busca e listagem paginada de perfis públicos (RF7).
  */
 profilesRouter.get('/', async (c) => {
   try {
     const { db } = await getDatabase(c.env);
-    const query = c.req.query('q')?.trim() || '';
+    const query = c.req.query('q')?.trim().slice(0, 64) || '';
     const limit = Math.min(Math.max(1, Number(c.req.query('limit')) || 20), 50);
     const page = Math.max(1, Number(c.req.query('page')) || 1);
     const skip = (page - 1) * limit;
@@ -129,7 +213,8 @@ profilesRouter.get('/', async (c) => {
 
 /**
  * POST /api/profiles
- * Cria uma conta de usuário (users) e seu respectivo perfil 1:1 (profiles) (RF1, RF2, RN1, RN2, RN15).
+ * Cria uma conta de usuário (users) e seu respectivo perfil 1:1 (profiles) (RF1, RF2, RN1, RN2, RN15)
+ * e autentica o usuário automaticamente (UC01, RN16).
  */
 profilesRouter.post('/', async (c) => {
   try {
@@ -143,7 +228,7 @@ profilesRouter.post('/', async (c) => {
     const rawDisplayName = typeof body.display_name === 'string' ? body.display_name : '';
     const rawPassword = typeof body.password === 'string' ? body.password : '';
 
-    if (!rawEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail)) {
+    if (!rawEmail || !isValidEmail(rawEmail)) {
       return c.json({ error: 'Email inválido ou ausente.' }, 400);
     }
 
@@ -152,10 +237,23 @@ profilesRouter.post('/', async (c) => {
       return c.json({ error: usernameValidation.error }, 400);
     }
 
+    // Em produção toda conta local precisa de senha; em dev/teste contas de demonstração sem senha são aceitas.
+    const requirePassword = c.env.NODE_ENV === 'production';
+    if (rawPassword || requirePassword) {
+      const passwordError = validatePassword(rawPassword);
+      if (passwordError) {
+        return c.json({ error: passwordError }, 400);
+      }
+    }
+
     const username = usernameValidation.username;
-    const displayName = sanitizeText(rawDisplayName || username);
+    const displayName = sanitizeText(rawDisplayName || username).slice(0, MAX_DISPLAY_NAME_LENGTH);
     if (!displayName) {
       return c.json({ error: 'O nome de exibição (display_name) é obrigatório.' }, 400);
+    }
+
+    if (body.avatar_url !== undefined && body.avatar_url !== null && body.avatar_url !== '' && !isSafeAvatarUrl(body.avatar_url)) {
+      return c.json({ error: 'avatar_url deve ser uma URL http(s) válida.' }, 400);
     }
 
     const { db } = await getDatabase(c.env);
@@ -171,46 +269,36 @@ profilesRouter.post('/', async (c) => {
       return c.json({ error: 'Este nome de usuário já está em uso (RN2).' }, 409);
     }
 
-    const now = new Date();
-    const userId = new ObjectId();
-    const profileId = new ObjectId();
-    const passwordHash = rawPassword ? await hashSha256(rawPassword) : null;
-
-    const newUser: User = {
-      _id: userId,
+    const { user, profile } = await createAccountWithProfile(db, {
       email: rawEmail,
-      password_hash: passwordHash,
-      auth_provider: body.auth_provider === 'google' || body.auth_provider === 'apple' ? body.auth_provider : 'local',
-      auth_provider_id: typeof body.auth_provider_id === 'string' ? body.auth_provider_id : null,
-      created_at: now,
-      updated_at: now,
-    };
-
-    const newProfile: Profile = {
-      _id: profileId,
-      user_id: userId,
       username,
-      display_name: displayName,
-      bio: typeof body.bio === 'string' ? sanitizeText(body.bio) : undefined,
-      avatar_url: typeof body.avatar_url === 'string' ? body.avatar_url.trim() : undefined,
-      theme_config: sanitizeThemeConfig(body.theme_config) ?? {
-        background_color: '#121212',
-        card_background: '#1e1e1e',
-        text_color: '#e0e0e0',
-        accent_color: '#00ffcc',
-        font_family: 'monospace',
-      },
-      created_at: now,
-      updated_at: now,
-    };
+      displayName,
+      passwordHash: rawPassword ? await hashPassword(rawPassword) : null,
+      // O cadastro público é sempre local; contas OAuth são criadas apenas pelo fluxo /api/auth/google
+      authProvider: 'local',
+      authProviderId: null,
+      bio: typeof body.bio === 'string' ? sanitizeText(body.bio).slice(0, MAX_BIO_LENGTH) : undefined,
+      avatarUrl: typeof body.avatar_url === 'string' && body.avatar_url ? body.avatar_url.trim() : undefined,
+      themeConfig: sanitizeThemeConfig(body.theme_config),
+    });
 
-    await db.collection<User>('users').insertOne(newUser);
-    await db.collection<Profile>('profiles').insertOne(newProfile);
+    // Autentica automaticamente após o cadastro (UC01)
+    const session = await createSessionForUser(c, db, user._id!);
+    const { ipHash } = await getClientIdentity(c.req.raw);
+    await logAuditEvent(db, 'account.created', {
+      user_id: user._id,
+      profile_id: profile._id,
+      ip_hash: ipHash,
+      username,
+      has_password: !!user.password_hash,
+    });
 
     return c.json(
       {
         message: 'Conta e perfil criados com sucesso.',
-        profile: serializeProfile(newProfile),
+        profile: serializeProfile(profile),
+        session_token: session.token,
+        session_expires_at: session.expiresAt.toISOString(),
       },
       201
     );
@@ -235,9 +323,11 @@ profilesRouter.get('/:username', async (c) => {
       return c.json({ error: 'Perfil não encontrado.' }, 404);
     }
 
+    const { originFingerprint } = await getClientIdentity(c.req.raw);
+
     return c.json({
       profile: serializeProfile(result.profile),
-      comments: result.comments.map((comment) => serializeComment(comment)),
+      comments: result.comments.map((comment) => serializeComment(comment, originFingerprint)),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -248,6 +338,7 @@ profilesRouter.get('/:username', async (c) => {
 /**
  * PATCH /api/profiles/:username
  * Atualiza dados públicos e estilização (theme_config) do perfil (RF3, RF8, RNF5).
+ * Exige que o solicitante seja o dono do perfil (UC02).
  */
 profilesRouter.patch('/:username', async (c) => {
   try {
@@ -263,12 +354,18 @@ profilesRouter.patch('/:username', async (c) => {
       return c.json({ error: 'Perfil não encontrado.' }, 404);
     }
 
+    const authz = await authorizeProfileOwner(c, db, existing);
+    if (!authz.ok) {
+      await logAuditEvent(db, 'auth.unauthorized', { profile_id: existing._id, operation: 'profile.update' });
+      return c.json({ error: authz.error }, authz.status);
+    }
+
     const updates: Partial<Profile> = {
       updated_at: new Date(),
     };
 
     if (typeof body.display_name === 'string') {
-      const sanitizedName = sanitizeText(body.display_name);
+      const sanitizedName = sanitizeText(body.display_name).slice(0, MAX_DISPLAY_NAME_LENGTH);
       if (!sanitizedName) {
         return c.json({ error: 'display_name não pode ser vazio.' }, 400);
       }
@@ -276,11 +373,15 @@ profilesRouter.patch('/:username', async (c) => {
     }
 
     if (typeof body.bio === 'string') {
-      updates.bio = sanitizeText(body.bio);
+      updates.bio = sanitizeText(body.bio).slice(0, MAX_BIO_LENGTH);
     }
 
     if (typeof body.avatar_url === 'string') {
-      updates.avatar_url = body.avatar_url.trim();
+      const trimmed = body.avatar_url.trim();
+      if (trimmed && !isSafeAvatarUrl(trimmed)) {
+        return c.json({ error: 'avatar_url deve ser uma URL http(s) válida.' }, 400);
+      }
+      updates.avatar_url = trimmed || undefined;
     }
 
     if (body.theme_config !== undefined) {
@@ -296,6 +397,12 @@ profilesRouter.patch('/:username', async (c) => {
     await db.collection<Profile>('profiles').updateOne({ _id: existing._id }, { $set: updates });
     const updated = await db.collection<Profile>('profiles').findOne({ _id: existing._id });
 
+    await logAuditEvent(db, 'profile.updated', {
+      user_id: existing.user_id,
+      profile_id: existing._id,
+      fields: Object.keys(updates).filter((k) => k !== 'updated_at'),
+    });
+
     return c.json({
       message: 'Perfil atualizado com sucesso.',
       profile: serializeProfile(updated || { ...existing, ...updates }),
@@ -307,8 +414,98 @@ profilesRouter.patch('/:username', async (c) => {
 });
 
 /**
+ * POST /api/profiles/:username/avatar
+ * Upload da foto de perfil para o Cloudflare R2 (RF3). Aceita `multipart/form-data` (campo `avatar`)
+ * ou o binário da imagem diretamente no corpo com `Content-Type: image/*`. Limite de 2 MB.
+ */
+profilesRouter.post('/:username/avatar', async (c) => {
+  try {
+    const bucket = c.env.AVATARS_BUCKET;
+    if (!bucket) {
+      return c.json({ error: 'Armazenamento de avatares (R2) não configurado neste ambiente.' }, 503);
+    }
+
+    const username = normalizeUsername(c.req.param('username'));
+    const { db } = await getDatabase(c.env);
+    const profile = await db.collection<Profile>('profiles').findOne({ username });
+    if (!profile || !profile._id) {
+      return c.json({ error: 'Perfil não encontrado.' }, 404);
+    }
+
+    const authz = await authorizeProfileOwner(c, db, profile);
+    if (!authz.ok) {
+      await logAuditEvent(db, 'auth.unauthorized', { profile_id: profile._id, operation: 'profile.avatar' });
+      return c.json({ error: authz.error }, authz.status);
+    }
+
+    const requestType = (c.req.header('Content-Type') || '').toLowerCase();
+    let contentType: string;
+    let data: ArrayBuffer;
+
+    if (requestType.startsWith('multipart/form-data')) {
+      const form = await c.req.formData();
+      const file = form.get('avatar');
+      if (!file || typeof file === 'string') {
+        return c.json({ error: 'Envie a imagem no campo "avatar".' }, 400);
+      }
+      contentType = file.type.toLowerCase();
+      data = await file.arrayBuffer();
+    } else {
+      contentType = requestType.split(';')[0].trim();
+      data = await c.req.arrayBuffer();
+    }
+
+    const extension = AVATAR_CONTENT_TYPES[contentType];
+    if (!extension) {
+      return c.json({ error: 'Formato inválido. Use PNG, JPEG, WEBP ou GIF.' }, 415);
+    }
+    if (data.byteLength === 0) {
+      return c.json({ error: 'Arquivo de imagem vazio.' }, 400);
+    }
+    if (data.byteLength > AVATAR_MAX_BYTES) {
+      return c.json({ error: 'A imagem excede o limite de 2 MB.' }, 413);
+    }
+
+    const key = `${profile._id.toString()}-${Date.now()}.${extension}`;
+    await bucket.put(`avatars/${key}`, data, {
+      httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
+    });
+
+    const previousKey = extractAvatarKey(profile.avatar_url);
+    if (previousKey) {
+      await bucket.delete(`avatars/${previousKey}`).catch(() => undefined);
+    }
+
+    const avatarUrl = `${new URL(c.req.url).origin}/api/avatars/${key}`;
+    await db
+      .collection<Profile>('profiles')
+      .updateOne({ _id: profile._id }, { $set: { avatar_url: avatarUrl, updated_at: new Date() } });
+
+    await logAuditEvent(db, 'profile.avatar_uploaded', {
+      user_id: profile.user_id,
+      profile_id: profile._id,
+      bytes: data.byteLength,
+      content_type: contentType,
+    });
+
+    return c.json({ message: 'Avatar atualizado com sucesso.', avatar_url: avatarUrl });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 500);
+  }
+});
+
+/** Extrai a chave do objeto R2 a partir de uma URL `/api/avatars/<key>` gerada pelo sistema. */
+export function extractAvatarKey(avatarUrl: string | undefined | null): string | null {
+  if (!avatarUrl) return null;
+  const match = avatarUrl.match(/\/api\/avatars\/([a-f0-9]{24}-\d+\.(?:png|jpg|webp|gif))$/);
+  return match ? match[1] : null;
+}
+
+/**
  * DELETE /api/profiles/:username
  * Exclui a conta, o perfil, as sessões e todos os comentários associados em cascata (RF4, RN3, RN10).
+ * Exige que o solicitante seja o dono do perfil (UC03).
  */
 profilesRouter.delete('/:username', async (c) => {
   try {
@@ -320,6 +517,12 @@ profilesRouter.delete('/:username', async (c) => {
       return c.json({ error: 'Perfil não encontrado.' }, 404);
     }
 
+    const authz = await authorizeProfileOwner(c, db, profile);
+    if (!authz.ok) {
+      await logAuditEvent(db, 'auth.unauthorized', { profile_id: profile._id, operation: 'account.delete' });
+      return c.json({ error: authz.error }, authz.status);
+    }
+
     const commentsDeleteResult = await db
       .collection('comments')
       .deleteMany({ profile_id: profile._id });
@@ -327,6 +530,18 @@ profilesRouter.delete('/:username', async (c) => {
     await db.collection('password_reset_tokens').deleteMany({ user_id: profile.user_id });
     await db.collection('profiles').deleteOne({ _id: profile._id });
     await db.collection('users').deleteOne({ _id: profile.user_id });
+
+    const avatarKey = extractAvatarKey(profile.avatar_url);
+    if (avatarKey && c.env.AVATARS_BUCKET) {
+      await c.env.AVATARS_BUCKET.delete(`avatars/${avatarKey}`).catch(() => undefined);
+    }
+
+    await logAuditEvent(db, 'account.deleted', {
+      user_id: profile.user_id,
+      profile_id: profile._id,
+      username,
+      deleted_comments_count: commentsDeleteResult.deletedCount,
+    });
 
     return c.json({
       message: 'Conta, perfil e comentários excluídos permanentemente (RN3).',

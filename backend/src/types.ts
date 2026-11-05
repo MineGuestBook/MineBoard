@@ -44,7 +44,7 @@ export interface Comment {
 }
 
 export interface Session {
-  _id: string; // Token de sessão
+  _id: string; // Hash SHA-256 do token de sessão (o token em claro só existe no cookie do cliente)
   user_id: ObjectId;
   expires_at: Date;
   created_at: Date;
@@ -56,5 +56,15 @@ export interface PasswordResetToken {
   token_hash: string;
   expires_at: Date;
   used_at?: Date | null;
+  created_at: Date;
+}
+
+export interface AuditLog {
+  _id?: ObjectId;
+  action: string;
+  user_id?: ObjectId | null;
+  profile_id?: ObjectId | null;
+  ip_hash?: string | null;
+  details?: Record<string, unknown>;
   created_at: Date;
 }
