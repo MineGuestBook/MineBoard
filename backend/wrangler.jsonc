@@ -1,6 +1,9 @@
 /**
  * For more details on how to configure Wrangler, refer to:
  * https://developers.cloudflare.com/workers/wrangler/configuration/
+ *
+ * Secrets (definir com `npx wrangler secret put <NOME> --env <dev|prod>`; nunca versionar):
+ *   MONGODB_URI, RESEND_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SETUP_TOKEN
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
@@ -17,8 +20,17 @@
 	"vars": {
 		"DATABASE_NAME": "guestbook",
 		"ROOT_DOMAIN": "nicolaspitz.dev",
-		"RATE_LIMIT_MAX_PER_MINUTE": "10"
+		"RATE_LIMIT_MAX_PER_MINUTE": "10",
+		"APP_URL": "http://localhost:5173",
+		"EMAIL_FROM": "GuestBook <onboarding@resend.dev>"
 	},
+	// Bucket local (simulado pelo Miniflare em `wrangler dev` e nos testes Vitest)
+	"r2_buckets": [
+		{
+			"binding": "AVATARS_BUCKET",
+			"bucket_name": "guestbook-avatars-local"
+		}
+	],
 	"env": {
 		"dev": {
 			"name": "guestbook-backend-dev",
@@ -26,8 +38,19 @@
 				"NODE_ENV": "development",
 				"DATABASE_NAME": "guestbook_dev",
 				"ROOT_DOMAIN": "nicolaspitz.dev",
-				"RATE_LIMIT_MAX_PER_MINUTE": "20"
-			}
+				"RATE_LIMIT_MAX_PER_MINUTE": "20",
+				"APP_URL": "https://dev.nicolaspitz.dev",
+				"PAGES_ORIGIN": "https://mineboard-guestbook-dev.pages.dev",
+				"SESSION_COOKIE_NAME": "guestbook_session_dev",
+				"EMAIL_FROM": "GuestBook Dev <onboarding@resend.dev>"
+			},
+			// Bucket provisionado pelo Pulumi (pulumi-prj, stack dev)
+			"r2_buckets": [
+				{
+					"binding": "AVATARS_BUCKET",
+					"bucket_name": "guestbook-avatars-dev"
+				}
+			]
 		},
 		"prod": {
 			"name": "guestbook-backend-prod",
@@ -35,8 +58,19 @@
 				"NODE_ENV": "production",
 				"DATABASE_NAME": "guestbook",
 				"ROOT_DOMAIN": "nicolaspitz.dev",
-				"RATE_LIMIT_MAX_PER_MINUTE": "10"
-			}
+				"RATE_LIMIT_MAX_PER_MINUTE": "10",
+				"APP_URL": "https://preview-prod.nicolaspitz.dev",
+				"PAGES_ORIGIN": "https://mineboard-guestbook-prod.pages.dev",
+				"SESSION_COOKIE_NAME": "guestbook_session",
+				"EMAIL_FROM": "GuestBook <onboarding@resend.dev>"
+			},
+			// Bucket provisionado pelo Pulumi (pulumi-prj, stack prod)
+			"r2_buckets": [
+				{
+					"binding": "AVATARS_BUCKET",
+					"bucket_name": "guestbook-avatars-prod"
+				}
+			]
 		}
 	}
 }
