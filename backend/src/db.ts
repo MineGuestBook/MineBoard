@@ -26,12 +26,20 @@ export interface Env {
 }
 
 let testDbOverride: Db | null = null;
+const cacheResetListeners: Array<() => void> = [];
+
+export function onDatabaseReset(listener: () => void): void {
+  cacheResetListeners.push(listener);
+}
 
 /**
  * Permite injetar uma instância de banco (mock/in-memory) durante a execução de testes no Vitest.
  */
 export function setTestDatabase(db: Db | null): void {
   testDbOverride = db;
+  for (const listener of cacheResetListeners) {
+    listener();
+  }
 }
 
 /**

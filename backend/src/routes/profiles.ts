@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { ObjectId } from 'bson';
 import type { Db } from 'mongodb';
-import { Env, getDatabase } from '../db';
+import { Env, getDatabase, onDatabaseReset } from '../db';
 import { Profile, ProfileThemeConfig, User, Comment } from '../types';
 import {
   getClientIdentity,
@@ -90,6 +90,20 @@ export function serializeComment(comment: Comment, currentFingerprint?: string) 
   };
 }
 
+const PUBLIC_CACHE_TTL_MS = 30_000;
+const profileListCache = new Map<string, { expiresAt: number; profiles: Profile[] }>();
+const profileDetailCache = new Map<string, { expiresAt: number; profile: Profile; comments: Comment[] }>();
+
+/**
+ * Invalida o cache em memória do isolate sempre que qualquer perfil, comentário ou curtida é alterado.
+ */
+export function invalidatePublicCache(): void {
+  profileListCache.clear();
+  profileDetailCache.clear();
+}
+
+onDatabaseReset(invalidatePublicCache);
+
 /**
  * Busca um perfil pelo username e carrega seus comentários mais recentes (RF9, RNF3).
  * Reutilizado tanto pela rota `/api/profiles/:username` quanto pela resolução via subdomínio (`Host`).
@@ -100,13 +114,19 @@ export async function findProfileWithComments(
   limit = 20
 ): Promise<{ profile: Profile; comments: Comment[] } | null> {
   const username = normalizeUsername(rawUsername);
+  const safeLimit = Math.min(Math.max(1, limit), 100);
+  const cacheKey = `${username}:${safeLimit}`;
+  const cached = profileDetailCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { profile: cached.profile, comments: cached.comments };
+  }
+
   const profile = await db.collection<Profile>('profiles').findOne({ username });
 
   if (!profile || !profile._id) {
     return null;
   }
 
-  const safeLimit = Math.min(Math.max(1, limit), 100);
   const comments = await db
     .collection<Comment>('comments')
     .find({ profile_id: profile._id })
@@ -114,7 +134,32 @@ export async function findProfileWithComments(
     .limit(safeLimit)
     .toArray();
 
+  profileDetailCache.set(cacheKey, {
+    expiresAt: Date.now() + PUBLIC_CACHE_TTL_MS,
+    profile,
+    comments,
+  });
+
   return { profile, comments };
+}
+
+/**
+ * Consulta o cache antes de abrir conexão com o MongoDB Atlas, evitando o handshake TLS/SCRAM em leituras repetidas.
+ */
+export async function getCachedProfileWithComments(
+  env: Env,
+  rawUsername: string,
+  limit = 20
+): Promise<{ profile: Profile; comments: Comment[] } | null> {
+  const username = normalizeUsername(rawUsername);
+  const safeLimit = Math.min(Math.max(1, limit), 100);
+  const cacheKey = `${username}:${safeLimit}`;
+  const cached = profileDetailCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { profile: cached.profile, comments: cached.comments };
+  }
+  const { db } = await getDatabase(env);
+  return findProfileWithComments(db, username, safeLimit);
 }
 
 /**
@@ -169,6 +214,7 @@ export async function createAccountWithProfile(
     throw err;
   }
 
+  invalidatePublicCache();
   return { user, profile };
 }
 
@@ -178,11 +224,21 @@ export async function createAccountWithProfile(
  */
 profilesRouter.get('/', async (c) => {
   try {
-    const { db } = await getDatabase(c.env);
     const query = c.req.query('q')?.trim().slice(0, 64) || '';
     const limit = Math.min(Math.max(1, Number(c.req.query('limit')) || 20), 50);
     const page = Math.max(1, Number(c.req.query('page')) || 1);
     const skip = (page - 1) * limit;
+    const cacheKey = `${query.toLowerCase()}:${page}:${limit}`;
+
+    const cached = profileListCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return c.json({
+        profiles: cached.profiles.map(serializeProfile),
+        pagination: { page, limit, count: cached.profiles.length },
+      });
+    }
+
+    const { db } = await getDatabase(c.env);
 
     const filter: Record<string, unknown> = {};
     if (query) {
@@ -200,6 +256,11 @@ profilesRouter.get('/', async (c) => {
       .skip(skip)
       .limit(limit)
       .toArray();
+
+    profileListCache.set(cacheKey, {
+      expiresAt: Date.now() + PUBLIC_CACHE_TTL_MS,
+      profiles,
+    });
 
     return c.json({
       profiles: profiles.map(serializeProfile),
@@ -258,13 +319,14 @@ profilesRouter.post('/', async (c) => {
 
     const { db } = await getDatabase(c.env);
 
-    // Verifica unicidade de email e username (RN2)
-    const existingUser = await db.collection<User>('users').findOne({ email: rawEmail });
+    // Verifica unicidade de email e username em paralelo (RN2)
+    const [existingUser, existingProfile] = await Promise.all([
+      db.collection<User>('users').findOne({ email: rawEmail }),
+      db.collection<Profile>('profiles').findOne({ username }),
+    ]);
     if (existingUser) {
       return c.json({ error: 'Já existe uma conta cadastrada com este email.' }, 409);
     }
-
-    const existingProfile = await db.collection<Profile>('profiles').findOne({ username });
     if (existingProfile) {
       return c.json({ error: 'Este nome de usuário já está em uso (RN2).' }, 409);
     }
@@ -316,9 +378,8 @@ profilesRouter.get('/:username', async (c) => {
   try {
     const rawUsername = c.req.param('username');
     const limit = Number(c.req.query('limit')) || 20;
-    const { db } = await getDatabase(c.env);
 
-    const result = await findProfileWithComments(db, rawUsername, limit);
+    const result = await getCachedProfileWithComments(c.env, rawUsername, limit);
     if (!result) {
       return c.json({ error: 'Perfil não encontrado.' }, 404);
     }
@@ -395,6 +456,7 @@ profilesRouter.patch('/:username', async (c) => {
     }
 
     await db.collection<Profile>('profiles').updateOne({ _id: existing._id }, { $set: updates });
+    invalidatePublicCache();
     const updated = await db.collection<Profile>('profiles').findOne({ _id: existing._id });
 
     await logAuditEvent(db, 'profile.updated', {
@@ -480,6 +542,7 @@ profilesRouter.post('/:username/avatar', async (c) => {
     await db
       .collection<Profile>('profiles')
       .updateOne({ _id: profile._id }, { $set: { avatar_url: avatarUrl, updated_at: new Date() } });
+    invalidatePublicCache();
 
     await logAuditEvent(db, 'profile.avatar_uploaded', {
       user_id: profile.user_id,
@@ -523,13 +586,14 @@ profilesRouter.delete('/:username', async (c) => {
       return c.json({ error: authz.error }, authz.status);
     }
 
-    const commentsDeleteResult = await db
-      .collection('comments')
-      .deleteMany({ profile_id: profile._id });
-    await db.collection('sessions').deleteMany({ user_id: profile.user_id });
-    await db.collection('password_reset_tokens').deleteMany({ user_id: profile.user_id });
-    await db.collection('profiles').deleteOne({ _id: profile._id });
-    await db.collection('users').deleteOne({ _id: profile.user_id });
+    const [commentsDeleteResult] = await Promise.all([
+      db.collection('comments').deleteMany({ profile_id: profile._id }),
+      db.collection('sessions').deleteMany({ user_id: profile.user_id }),
+      db.collection('password_reset_tokens').deleteMany({ user_id: profile.user_id }),
+      db.collection('profiles').deleteOne({ _id: profile._id }),
+      db.collection('users').deleteOne({ _id: profile.user_id }),
+    ]);
+    invalidatePublicCache();
 
     const avatarKey = extractAvatarKey(profile.avatar_url);
     if (avatarKey && c.env.AVATARS_BUCKET) {

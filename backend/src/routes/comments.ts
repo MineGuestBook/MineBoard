@@ -4,7 +4,7 @@ import { ObjectId } from 'bson';
 import type { Db } from 'mongodb';
 import { Env, getDatabase } from '../db';
 import { Comment, Profile, User } from '../types';
-import { serializeComment } from './profiles';
+import { invalidatePublicCache, serializeComment } from './profiles';
 import {
   getClientIdentity,
   isValidEmail,
@@ -163,6 +163,7 @@ profileCommentsRouter.post('/:username/comments', async (c) => {
     };
 
     await db.collection<Comment>('comments').insertOne(newComment);
+    invalidatePublicCache();
     await logAuditEvent(db, 'comment.created', {
       profile_id: profile._id,
       comment_id: newComment._id?.toString(),
@@ -230,6 +231,7 @@ commentsRouter.post('/:id/like', async (c) => {
     }
 
     const updated = await db.collection<Comment>('comments').findOne({ _id: commentId });
+    invalidatePublicCache();
 
     return c.json({
       message: 'Curtida registrada com sucesso.',
@@ -274,6 +276,7 @@ commentsRouter.delete('/:id/like', async (c) => {
     }
 
     const updated = await db.collection<Comment>('comments').findOne({ _id: commentId });
+    invalidatePublicCache();
 
     return c.json({
       message: 'Curtida removida com sucesso.',
@@ -320,6 +323,7 @@ commentsRouter.delete('/:id', async (c) => {
     if (deleteResult.deletedCount === 0) {
       return c.json({ error: 'Comentário não encontrado.' }, 404);
     }
+    invalidatePublicCache();
 
     await logAuditEvent(db, 'comment.deleted', {
       user_id: profile?.user_id ?? null,

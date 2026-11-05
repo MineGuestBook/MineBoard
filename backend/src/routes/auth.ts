@@ -19,6 +19,7 @@ import {
 import {
   clearSessionCookie,
   createSessionForUser,
+  extractSessionToken,
   resolveAuthenticatedUser,
 } from '../utils/session';
 import { logAuditEvent } from '../utils/audit';
@@ -100,11 +101,13 @@ authRouter.post('/login', async (c) => {
  */
 authRouter.post('/logout', async (c) => {
   try {
-    const { db } = await getDatabase(c.env);
-    const auth = await resolveAuthenticatedUser(c, db);
-    if (auth) {
-      await db.collection<Session>('sessions').deleteOne({ _id: auth.session._id });
-      await logAuditEvent(db, 'auth.logout', { user_id: auth.user._id });
+    if (extractSessionToken(c)) {
+      const { db } = await getDatabase(c.env);
+      const auth = await resolveAuthenticatedUser(c, db);
+      if (auth) {
+        await db.collection<Session>('sessions').deleteOne({ _id: auth.session._id });
+        await logAuditEvent(db, 'auth.logout', { user_id: auth.user._id });
+      }
     }
     clearSessionCookie(c);
     return c.json({ message: 'Sessão encerrada.' });
@@ -120,6 +123,9 @@ authRouter.post('/logout', async (c) => {
  */
 authRouter.get('/me', async (c) => {
   try {
+    if (!extractSessionToken(c)) {
+      return c.json({ authenticated: false, error: 'Não autenticado.' }, 401);
+    }
     const { db } = await getDatabase(c.env);
     const auth = await resolveAuthenticatedUser(c, db);
     if (!auth) {

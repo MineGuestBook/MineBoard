@@ -7,6 +7,8 @@ import { Profile, User, Comment } from './types';
 import {
   profilesRouter,
   findProfileWithComments,
+  getCachedProfileWithComments,
+  invalidatePublicCache,
   serializeProfile,
   serializeComment,
 } from './routes/profiles';
@@ -167,6 +169,7 @@ app.post('/api/setup/seed', async (c) => {
       ];
 
       await db.collection<Comment>('comments').insertMany(sampleComments);
+      invalidatePublicCache();
     }
 
     return c.json({
@@ -201,8 +204,7 @@ app.get('/api/host-profile', async (c) => {
       );
     }
 
-    const { db } = await getDatabase(c.env);
-    const result = await findProfileWithComments(db, subdomainUsername);
+    const result = await getCachedProfileWithComments(c.env, subdomainUsername);
     if (!result) {
       return c.json(
         {
@@ -232,9 +234,8 @@ app.get('/api/widget/:username', async (c) => {
   try {
     const username = c.req.param('username');
     const limit = Number(c.req.query('limit')) || 10;
-    const { db } = await getDatabase(c.env);
 
-    const result = await findProfileWithComments(db, username, limit);
+    const result = await getCachedProfileWithComments(c.env, username, limit);
     if (!result) {
       return c.json({ error: 'Perfil não encontrado ou inativo (RN11).' }, 404);
     }
@@ -255,8 +256,7 @@ app.get('/api/widget/:username', async (c) => {
 // Script embutível do widget: <script src=".../api/widget/<username>/embed.js"></script> (UC10)
 app.get('/api/widget/:username/embed.js', async (c) => {
   try {
-    const { db } = await getDatabase(c.env);
-    const result = await findProfileWithComments(db, c.req.param('username'), 1);
+    const result = await getCachedProfileWithComments(c.env, c.req.param('username'), 1);
     if (!result) {
       return c.body('console.warn("GuestBook: perfil não encontrado (RN11).");', 404, {
         'Content-Type': 'application/javascript; charset=utf-8',
@@ -277,8 +277,7 @@ app.get('/api/widget/:username/embed.js', async (c) => {
 app.get('/api/widget/:username/frame', async (c) => {
   try {
     const limit = Number(c.req.query('limit')) || 10;
-    const { db } = await getDatabase(c.env);
-    const result = await findProfileWithComments(db, c.req.param('username'), limit);
+    const result = await getCachedProfileWithComments(c.env, c.req.param('username'), limit);
     if (!result) {
       return c.html('<p style="font-family:monospace">Perfil não encontrado (RN11).</p>', 404);
     }

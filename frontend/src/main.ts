@@ -127,7 +127,18 @@ async function handleRoute(): Promise<void> {
   }
 
   // Verifica se está acessando via subdomínio (<username>.nicolaspitz.dev)
-  if (path === '/') {
+  const hostname = window.location.hostname.toLowerCase();
+  const isBaseDomain =
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === 'nicolaspitz.dev' ||
+    hostname === 'www.nicolaspitz.dev' ||
+    hostname === 'dev.nicolaspitz.dev' ||
+    hostname === 'preview-prod.nicolaspitz.dev' ||
+    hostname.endsWith('.pages.dev') ||
+    hostname.endsWith('.workers.dev');
+
+  if (path === '/' && !isBaseDomain) {
     try {
       const hostInfo = await api.getHostProfile();
       if (hostInfo.mode === 'subdomain' && hostInfo.profile) {
@@ -742,7 +753,11 @@ window.addEventListener('popstate', () => {
   void handleRoute();
 });
 
+render();
+
 void (async () => {
-  await refreshSession();
-  await handleRoute();
+  await Promise.all([
+    refreshSession().then(() => render()),
+    handleRoute(),
+  ]);
 })();

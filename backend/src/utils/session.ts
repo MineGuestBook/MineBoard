@@ -101,10 +101,12 @@ export async function resolveAuthenticatedUser(c: AppContext, db: Db): Promise<A
     return null;
   }
 
-  const user = await db.collection<User>('users').findOne({ _id: session.user_id });
+  const [user, profile] = await Promise.all([
+    db.collection<User>('users').findOne({ _id: session.user_id }),
+    db.collection<Profile>('profiles').findOne({ user_id: session.user_id }),
+  ]);
   if (!user || !user._id) return null;
 
-  const profile = await db.collection<Profile>('profiles').findOne({ user_id: user._id });
   return { user, profile, session };
 }
 
