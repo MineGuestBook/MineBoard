@@ -163,7 +163,7 @@ profileCommentsRouter.post('/:username/comments', async (c) => {
     };
 
     await db.collection<Comment>('comments').insertOne(newComment);
-    invalidatePublicCache();
+    await invalidatePublicCache(profile.username);
     await logAuditEvent(db, 'comment.created', {
       profile_id: profile._id,
       comment_id: newComment._id?.toString(),
@@ -231,7 +231,8 @@ commentsRouter.post('/:id/like', async (c) => {
     }
 
     const updated = await db.collection<Comment>('comments').findOne({ _id: commentId });
-    invalidatePublicCache();
+    const profile = updated ? await db.collection<Profile>('profiles').findOne({ _id: updated.profile_id }) : null;
+    await invalidatePublicCache(profile?.username);
 
     return c.json({
       message: 'Curtida registrada com sucesso.',
@@ -276,7 +277,8 @@ commentsRouter.delete('/:id/like', async (c) => {
     }
 
     const updated = await db.collection<Comment>('comments').findOne({ _id: commentId });
-    invalidatePublicCache();
+    const profile = updated ? await db.collection<Profile>('profiles').findOne({ _id: updated.profile_id }) : null;
+    await invalidatePublicCache(profile?.username);
 
     return c.json({
       message: 'Curtida removida com sucesso.',
@@ -323,7 +325,7 @@ commentsRouter.delete('/:id', async (c) => {
     if (deleteResult.deletedCount === 0) {
       return c.json({ error: 'Comentário não encontrado.' }, 404);
     }
-    invalidatePublicCache();
+    await invalidatePublicCache(profile?.username);
 
     await logAuditEvent(db, 'comment.deleted', {
       user_id: profile?.user_id ?? null,

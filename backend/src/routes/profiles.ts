@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { ObjectId } from 'bson';
 import type { Db } from 'mongodb';
-import { Env, getDatabase, onDatabaseReset } from '../db';
+import { Env, getDatabase, isTestDatabaseActive, onDatabaseReset } from '../db';
 import { Profile, ProfileThemeConfig, User, Comment } from '../types';
 import {
   getClientIdentity,
@@ -90,19 +90,63 @@ export function serializeComment(comment: Comment, currentFingerprint?: string) 
   };
 }
 
-const PUBLIC_CACHE_TTL_MS = 30_000;
+const PUBLIC_CACHE_TTL_MS = 60_000;
+const EDGE_CACHE_TTL_SECONDS = 60;
+const EDGE_CACHE_ORIGIN = 'https://cache.guestbook.internal';
 const profileListCache = new Map<string, { expiresAt: number; profiles: Profile[] }>();
 const profileDetailCache = new Map<string, { expiresAt: number; profile: Profile; comments: Comment[] }>();
 
-/**
- * Invalida o cache em memória do isolate sempre que qualquer perfil, comentário ou curtida é alterado.
- */
-export function invalidatePublicCache(): void {
-  profileListCache.clear();
-  profileDetailCache.clear();
+function getEdgeCache(): Cache | null {
+  if (isTestDatabaseActive()) return null;
+  if (typeof caches !== 'undefined' && 'default' in caches) {
+    return (caches as unknown as { default: Cache }).default;
+  }
+  return null;
 }
 
-onDatabaseReset(invalidatePublicCache);
+function reviveProfile(raw: Profile): Profile {
+  return {
+    ...raw,
+    _id: raw._id ? new ObjectId(String(raw._id)) : undefined,
+    user_id: new ObjectId(String(raw.user_id)),
+    created_at: new Date(raw.created_at),
+    updated_at: new Date(raw.updated_at),
+  };
+}
+
+function reviveComment(raw: Comment): Comment {
+  return {
+    ...raw,
+    _id: raw._id ? new ObjectId(String(raw._id)) : undefined,
+    profile_id: new ObjectId(String(raw.profile_id)),
+    created_at: new Date(raw.created_at),
+  };
+}
+
+/**
+ * Invalida o cache em memória do isolate e o Cloudflare Edge Cache (`caches.default`)
+ * sempre que qualquer perfil, comentário ou curtida é alterado.
+ */
+export async function invalidatePublicCache(username?: string): Promise<void> {
+  profileListCache.clear();
+  profileDetailCache.clear();
+
+  const edgeCache = getEdgeCache();
+  if (!edgeCache) return;
+
+  const tasks: Promise<boolean>[] = [
+    edgeCache.delete(`${EDGE_CACHE_ORIGIN}/profiles-list`),
+  ];
+  if (username) {
+    tasks.push(edgeCache.delete(`${EDGE_CACHE_ORIGIN}/profile/${normalizeUsername(username)}`));
+  }
+  await Promise.allSettled(tasks);
+}
+
+onDatabaseReset(() => {
+  profileListCache.clear();
+  profileDetailCache.clear();
+});
 
 /**
  * Busca um perfil pelo username e carrega seus comentários mais recentes (RF9, RNF3).
@@ -115,10 +159,9 @@ export async function findProfileWithComments(
 ): Promise<{ profile: Profile; comments: Comment[] } | null> {
   const username = normalizeUsername(rawUsername);
   const safeLimit = Math.min(Math.max(1, limit), 100);
-  const cacheKey = `${username}:${safeLimit}`;
-  const cached = profileDetailCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { profile: cached.profile, comments: cached.comments };
+  const cached = profileDetailCache.get(username);
+  if (cached && cached.expiresAt > Date.now() && cached.comments.length >= safeLimit) {
+    return { profile: cached.profile, comments: cached.comments.slice(0, safeLimit) };
   }
 
   const profile = await db.collection<Profile>('profiles').findOne({ username });
@@ -127,24 +170,42 @@ export async function findProfileWithComments(
     return null;
   }
 
+  const fetchLimit = Math.max(safeLimit, 50);
   const comments = await db
     .collection<Comment>('comments')
     .find({ profile_id: profile._id })
     .sort({ created_at: -1 })
-    .limit(safeLimit)
+    .limit(fetchLimit)
     .toArray();
 
-  profileDetailCache.set(cacheKey, {
+  profileDetailCache.set(username, {
     expiresAt: Date.now() + PUBLIC_CACHE_TTL_MS,
     profile,
     comments,
   });
 
-  return { profile, comments };
+  const edgeCache = getEdgeCache();
+  if (edgeCache) {
+    const cacheUrl = `${EDGE_CACHE_ORIGIN}/profile/${username}`;
+    await edgeCache
+      .put(
+        cacheUrl,
+        new Response(JSON.stringify({ profile, comments }), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': `public, max-age=${EDGE_CACHE_TTL_SECONDS}`,
+          },
+        })
+      )
+      .catch(() => undefined);
+  }
+
+  return { profile, comments: comments.slice(0, safeLimit) };
 }
 
 /**
- * Consulta o cache antes de abrir conexão com o MongoDB Atlas, evitando o handshake TLS/SCRAM em leituras repetidas.
+ * Consulta o cache (memória + Cloudflare Edge Cache) antes de abrir conexão com o MongoDB Atlas,
+ * evitando o handshake TLS/SCRAM em leituras repetidas.
  */
 export async function getCachedProfileWithComments(
   env: Env,
@@ -153,11 +214,27 @@ export async function getCachedProfileWithComments(
 ): Promise<{ profile: Profile; comments: Comment[] } | null> {
   const username = normalizeUsername(rawUsername);
   const safeLimit = Math.min(Math.max(1, limit), 100);
-  const cacheKey = `${username}:${safeLimit}`;
-  const cached = profileDetailCache.get(cacheKey);
+  const cached = profileDetailCache.get(username);
   if (cached && cached.expiresAt > Date.now()) {
-    return { profile: cached.profile, comments: cached.comments };
+    return { profile: cached.profile, comments: cached.comments.slice(0, safeLimit) };
   }
+
+  const edgeCache = getEdgeCache();
+  if (edgeCache) {
+    const hit = await edgeCache.match(`${EDGE_CACHE_ORIGIN}/profile/${username}`).catch(() => undefined);
+    if (hit) {
+      const parsed = (await hit.json()) as { profile: Profile; comments: Comment[] };
+      const revivedProfile = reviveProfile(parsed.profile);
+      const revivedComments = parsed.comments.map(reviveComment);
+      profileDetailCache.set(username, {
+        expiresAt: Date.now() + PUBLIC_CACHE_TTL_MS,
+        profile: revivedProfile,
+        comments: revivedComments,
+      });
+      return { profile: revivedProfile, comments: revivedComments.slice(0, safeLimit) };
+    }
+  }
+
   const { db } = await getDatabase(env);
   return findProfileWithComments(db, username, safeLimit);
 }
@@ -214,7 +291,7 @@ export async function createAccountWithProfile(
     throw err;
   }
 
-  invalidatePublicCache();
+  await invalidatePublicCache(profile.username);
   return { user, profile };
 }
 
@@ -236,6 +313,23 @@ profilesRouter.get('/', async (c) => {
         profiles: cached.profiles.map(serializeProfile),
         pagination: { page, limit, count: cached.profiles.length },
       });
+    }
+
+    const edgeCache = !query && page === 1 ? getEdgeCache() : null;
+    if (edgeCache) {
+      const hit = await edgeCache.match(`${EDGE_CACHE_ORIGIN}/profiles-list`).catch(() => undefined);
+      if (hit) {
+        const rawList = (await hit.json()) as Profile[];
+        const revived = rawList.map(reviveProfile).slice(0, limit);
+        profileListCache.set(cacheKey, {
+          expiresAt: Date.now() + PUBLIC_CACHE_TTL_MS,
+          profiles: revived,
+        });
+        return c.json({
+          profiles: revived.map(serializeProfile),
+          pagination: { page, limit, count: revived.length },
+        });
+      }
     }
 
     const { db } = await getDatabase(c.env);
@@ -261,6 +355,20 @@ profilesRouter.get('/', async (c) => {
       expiresAt: Date.now() + PUBLIC_CACHE_TTL_MS,
       profiles,
     });
+
+    if (edgeCache) {
+      await edgeCache
+        .put(
+          `${EDGE_CACHE_ORIGIN}/profiles-list`,
+          new Response(JSON.stringify(profiles), {
+            headers: {
+              'Content-Type': 'application/json',
+              'Cache-Control': `public, max-age=${EDGE_CACHE_TTL_SECONDS}`,
+            },
+          })
+        )
+        .catch(() => undefined);
+    }
 
     return c.json({
       profiles: profiles.map(serializeProfile),
@@ -456,7 +564,7 @@ profilesRouter.patch('/:username', async (c) => {
     }
 
     await db.collection<Profile>('profiles').updateOne({ _id: existing._id }, { $set: updates });
-    invalidatePublicCache();
+    await invalidatePublicCache(existing.username);
     const updated = await db.collection<Profile>('profiles').findOne({ _id: existing._id });
 
     await logAuditEvent(db, 'profile.updated', {
@@ -542,7 +650,7 @@ profilesRouter.post('/:username/avatar', async (c) => {
     await db
       .collection<Profile>('profiles')
       .updateOne({ _id: profile._id }, { $set: { avatar_url: avatarUrl, updated_at: new Date() } });
-    invalidatePublicCache();
+    await invalidatePublicCache(profile.username);
 
     await logAuditEvent(db, 'profile.avatar_uploaded', {
       user_id: profile.user_id,
@@ -593,7 +701,7 @@ profilesRouter.delete('/:username', async (c) => {
       db.collection('profiles').deleteOne({ _id: profile._id }),
       db.collection('users').deleteOne({ _id: profile.user_id }),
     ]);
-    invalidatePublicCache();
+    await invalidatePublicCache(profile.username);
 
     const avatarKey = extractAvatarKey(profile.avatar_url);
     if (avatarKey && c.env.AVATARS_BUCKET) {

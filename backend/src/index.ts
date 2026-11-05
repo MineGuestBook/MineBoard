@@ -169,7 +169,7 @@ app.post('/api/setup/seed', async (c) => {
       ];
 
       await db.collection<Comment>('comments').insertMany(sampleComments);
-      invalidatePublicCache();
+      await invalidatePublicCache(demoUsername);
     }
 
     return c.json({

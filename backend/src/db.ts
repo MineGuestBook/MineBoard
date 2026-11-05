@@ -32,6 +32,10 @@ export function onDatabaseReset(listener: () => void): void {
   cacheResetListeners.push(listener);
 }
 
+export function isTestDatabaseActive(): boolean {
+  return testDbOverride !== null;
+}
+
 /**
  * Permite injetar uma instância de banco (mock/in-memory) durante a execução de testes no Vitest.
  */
@@ -78,7 +82,7 @@ export async function withRequestDatabaseScope<T>(fn: () => Promise<T>): Promise
     if (scope.pending) {
       const pending = scope.pending;
       scope.pending = null;
-      pending.then(({ client }) => client.close()).catch(() => undefined);
+      await pending.then(({ client }) => client.close(true)).catch(() => undefined);
     }
   }
 }
