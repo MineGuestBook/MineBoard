@@ -73,6 +73,17 @@ export function getClientFingerprint(): string {
   }
 }
 
+function resolveApiBase(): string {
+  if (typeof window === 'undefined') return '';
+  const host = window.location.hostname.toLowerCase();
+  if (host.endsWith('.pages.dev')) {
+    return host.includes('-prod')
+      ? 'https://preview-prod.nicolaspitz.dev'
+      : 'https://dev.nicolaspitz.dev';
+  }
+  return '';
+}
+
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers || {});
   const token = getStoredToken();
@@ -81,7 +92,8 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   headers.set('X-Origin-Fingerprint', getClientFingerprint());
 
-  const res = await fetch(path, {
+  const url = path.startsWith('http') ? path : `${resolveApiBase()}${path}`;
+  const res = await fetch(url, {
     ...init,
     headers,
     credentials: 'include',

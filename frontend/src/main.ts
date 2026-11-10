@@ -37,9 +37,8 @@ const state: AppState = {
 };
 
 const FONT_OPTIONS = [
-  'monospace',
   'Courier New',
-  'Comic Sans MS',
+  'monospace',
   'Times New Roman',
   'Verdana',
   'Georgia',
@@ -126,7 +125,6 @@ async function handleRoute(): Promise<void> {
     return;
   }
 
-  // Verifica se está acessando via subdomínio (<username>.nicolaspitz.dev)
   const hostname = window.location.hostname.toLowerCase();
   const isBaseDomain =
     hostname === 'localhost' ||
@@ -170,20 +168,29 @@ function buildThemeStyle(theme?: ThemeConfig | null): string {
   return vars.join(';');
 }
 
+function renderAvatar(p: Profile): string {
+  if (p.avatar_url) {
+    return `<img class="avatar" src="${escapeAttr(p.avatar_url)}" alt="${escapeAttr(p.display_name)}" />`;
+  }
+  const initial = (p.username || '?').slice(0, 2).toUpperCase();
+  return `<div class="avatar">[${escapeAttr(initial)}]</div>`;
+}
+
 function renderTopbar(): string {
-  const userActions = state.currentUser && state.myProfile
-    ? `
-      <button class="btn" data-nav="/u/${escapeAttr(state.myProfile.username)}">📖 Meu GuestBook (@${escapeAttr(state.myProfile.username)})</button>
-      <button class="btn" data-nav="/dashboard">⚙️ Painel & Tema</button>
+  const userActions =
+    state.currentUser && state.myProfile
+      ? `
+      <button class="btn" data-nav="/u/${escapeAttr(state.myProfile.username)}">Meu Mural (@${escapeAttr(state.myProfile.username)})</button>
+      <button class="btn" data-nav="/dashboard">Configurações</button>
       <button class="btn btn-danger" id="btn-logout">Sair</button>
     `
-    : `<button class="btn" data-nav="/login">🔑 Entrar / Criar Conta</button>`;
+      : `<button class="btn" data-nav="/login">Entrar / Cadastrar</button>`;
 
   return `
     <header class="topbar">
-      <div class="brand" data-nav="/">💾 GuestBook Retrô</div>
+      <div class="brand" data-nav="/">[ MINEBOARD ]</div>
       <nav class="nav-actions">
-        <button class="btn" data-nav="/">🔍 Explorar Perfis</button>
+        <button class="btn" data-nav="/">Início</button>
         ${userActions}
       </nav>
     </header>
@@ -196,33 +203,29 @@ function renderHomeView(): string {
         .map(
           (p) => `
         <div class="profile-card">
-          ${
-            p.avatar_url
-              ? `<img class="avatar" src="${escapeAttr(p.avatar_url)}" alt="${p.display_name}" />`
-              : `<div class="avatar" style="display:flex;align-items:center;justify-content:center;font-size:1.6rem">👾</div>`
-          }
+          ${renderAvatar(p)}
           <div style="flex:1">
-            <div><strong>${p.display_name}</strong> <span style="opacity:.75">@${escapeAttr(p.username)}</span></div>
-            <div style="font-size:.88rem;opacity:.85;margin:4px 0">${p.bio || 'Sem biografia.'}</div>
-            <button class="btn" data-nav="/u/${escapeAttr(p.username)}">Visitar & Assinar Mural →</button>
+            <div><strong>${escapeAttr(p.display_name)}</strong> <span style="color:var(--muted-color)">@${escapeAttr(p.username)}</span></div>
+            <div style="font-size:0.82rem;color:var(--muted-color);margin:4px 0 8px">${escapeAttr(p.bio || 'Sem descrição.')}</div>
+            <button class="btn" data-nav="/u/${escapeAttr(p.username)}">Abrir mural -&gt;</button>
           </div>
         </div>
       `
         )
         .join('')
-    : `<p>Nenhum perfil encontrado. Crie o primeiro!</p>`;
+    : `<p>Nenhum perfil encontrado.</p>`;
 
   return `
     <section class="panel">
-      <h2>🌐 Bem-vindo ao GuestBook Web Retrô</h2>
-      <p>Crie seu livro de visitas pessoal estilizado nos moldes da web clássica! Visitantes podem assinar e curtir recados livremente sem precisar de conta.</p>
-      <form id="form-search" style="display:flex;gap:8px;margin-top:12px">
-        <input type="text" id="input-search" value="${escapeAttr(state.searchQuery)}" placeholder="Buscar por @username ou nome (RF7)..." style="flex:1;padding:8px;background:#000;color:#fff;border:1px solid var(--accent-color);font-family:inherit" />
+      <h2>MineBoard — Diretório de Murais</h2>
+      <p>Mural de recados retrô e minimalista. Visitantes podem assinar sem cadastro.</p>
+      <form id="form-search" style="display:flex;gap:8px">
+        <input type="text" id="input-search" value="${escapeAttr(state.searchQuery)}" placeholder="Buscar por @username ou nome..." style="flex:1;padding:6px 8px;background:#0d0d0d;color:var(--text-color);border:1px solid var(--border-color);font-family:inherit" />
         <button type="submit" class="btn">Buscar</button>
       </form>
     </section>
     <section class="panel">
-      <h3>📚 Livros de Visitas Públicos</h3>
+      <h3>Perfis Públicos (${state.profiles.length})</h3>
       <div class="grid-2">${cards}</div>
     </section>
   `;
@@ -232,14 +235,14 @@ function renderAuthView(): string {
   return `
     <div class="grid-2">
       <section class="panel">
-        <h2>✨ Criar Conta + GuestBook (UC01)</h2>
+        <h2>Criar Conta</h2>
         <form id="form-register">
           <div class="field">
-            <label>Username (subdomínio: username.nicolaspitz.dev)</label>
-            <input type="text" name="username" required pattern="^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])?$" placeholder="ex: joaosilva" />
+            <label>Username (subdomínio)</label>
+            <input type="text" name="username" required pattern="^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])?$" placeholder="joaosilva" />
           </div>
           <div class="field">
-            <label>Nome de Exibição</label>
+            <label>Nome</label>
             <input type="text" name="display_name" required placeholder="João Silva" />
           </div>
           <div class="field">
@@ -252,15 +255,15 @@ function renderAuthView(): string {
           </div>
           <div class="field">
             <label>Bio (opcional)</label>
-            <textarea name="bio" rows="2" placeholder="Bem-vindo ao meu cantinho retrô!"></textarea>
+            <textarea name="bio" rows="2" placeholder="Deixe uma mensagem no meu mural."></textarea>
           </div>
-          <button type="submit" class="btn">Criar Conta e Abrir GuestBook</button>
+          <button type="submit" class="btn">Cadastrar</button>
         </form>
       </section>
 
       <div>
         <section class="panel">
-          <h2>🔑 Entrar na Conta</h2>
+          <h2>Entrar</h2>
           <form id="form-login">
             <div class="field">
               <label>E-mail</label>
@@ -272,19 +275,19 @@ function renderAuthView(): string {
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <button type="submit" class="btn">Entrar</button>
-              <a class="btn" href="/api/auth/google">🌐 Entrar com Google (OAuth)</a>
+              <a class="btn" href="/api/auth/google">Login via Google</a>
             </div>
           </form>
         </section>
 
         <section class="panel">
-          <h3>📩 Esqueci Minha Senha (UC05)</h3>
+          <h3>Recuperar Senha</h3>
           <form id="form-forgot">
             <div class="field">
               <label>E-mail cadastrado</label>
               <input type="email" name="email" required placeholder="voce@exemplo.com" />
             </div>
-            <button type="submit" class="btn">Enviar Link de Recuperação</button>
+            <button type="submit" class="btn">Enviar Link</button>
           </form>
         </section>
       </div>
@@ -295,17 +298,17 @@ function renderAuthView(): string {
 function renderResetPasswordView(token: string): string {
   return `
     <section class="panel">
-      <h2>🔑 Redefinir Senha (UC05)</h2>
+      <h2>Redefinir Senha</h2>
       <form id="form-reset-password">
         <div class="field">
-          <label>Token de Recuperação</label>
+          <label>Token</label>
           <input type="text" name="token" value="${escapeAttr(token)}" required />
         </div>
         <div class="field">
           <label>Nova Senha (mín. 8 caracteres)</label>
           <input type="password" name="new_password" required minlength="8" />
         </div>
-        <button type="submit" class="btn">Salvar Nova Senha</button>
+        <button type="submit" class="btn">Salvar Senha</button>
       </form>
     </section>
   `;
@@ -314,7 +317,7 @@ function renderResetPasswordView(token: string): string {
 function renderDashboardView(): string {
   const p = state.myProfile;
   if (!p) {
-    return `<section class="panel"><p>Carregando perfil...</p></section>`;
+    return `<section class="panel"><p>Carregando...</p></section>`;
   }
   const t = p.theme_config || {};
   const origin = window.location.origin;
@@ -324,70 +327,73 @@ function renderDashboardView(): string {
   return `
     <div class="grid-2">
       <section class="panel">
-        <h2>🎨 Editar Perfil & Estilização (UC02, RF3, RF8)</h2>
+        <h2>Perfil e Tema</h2>
         <form id="form-edit-profile">
           <div class="field">
-            <label>Nome de Exibição</label>
+            <label>Nome</label>
             <input type="text" name="display_name" value="${escapeAttr(p.display_name)}" required />
           </div>
           <div class="field">
-            <label>Biografia / Mensagem de Boas-vindas</label>
-            <textarea name="bio" rows="3">${p.bio || ''}</textarea>
+            <label>Biografia</label>
+            <textarea name="bio" rows="3">${escapeAttr(p.bio || '')}</textarea>
           </div>
           <div class="grid-2">
             <div class="field">
-              <label>Cor de Fundo</label>
-              <input type="color" name="background_color" value="${escapeAttr(t.background_color || '#121212')}" />
+              <label>Fundo</label>
+              <input type="color" name="background_color" value="${escapeAttr(t.background_color || '#111111')}" />
             </div>
             <div class="field">
-              <label>Cor dos Cartões</label>
-              <input type="color" name="card_background" value="${escapeAttr(t.card_background || '#1e1e1e')}" />
+              <label>Painel</label>
+              <input type="color" name="card_background" value="${escapeAttr(t.card_background || '#181818')}" />
             </div>
             <div class="field">
-              <label>Cor do Texto</label>
-              <input type="color" name="text_color" value="${escapeAttr(t.text_color || '#e0e0e0')}" />
+              <label>Texto</label>
+              <input type="color" name="text_color" value="${escapeAttr(t.text_color || '#d4d4d4')}" />
             </div>
             <div class="field">
-              <label>Cor de Destaque (Borda/Links)</label>
-              <input type="color" name="accent_color" value="${escapeAttr(t.accent_color || '#00ffcc')}" />
+              <label>Borda / Destaque</label>
+              <input type="color" name="accent_color" value="${escapeAttr(t.accent_color || '#cccccc')}" />
             </div>
           </div>
           <div class="field">
-            <label>Fonte Retrô</label>
+            <label>Fonte</label>
             <select name="font_family">
               ${FONT_OPTIONS.map(
                 (f) => `<option value="${f}" ${t.font_family === f ? 'selected' : ''}>${f}</option>`
               ).join('')}
             </select>
           </div>
-          <button type="submit" class="btn">Salvar Alterações</button>
+          <button type="submit" class="btn">Salvar</button>
         </form>
 
-        <hr style="border-color:var(--accent-color);margin:18px 0" />
-        <h3>🖼️ Foto de Perfil no Cloudflare R2 (RF3)</h3>
+        <hr style="border:0;border-top:1px solid var(--border-color);margin:16px 0" />
+        <h3>Avatar</h3>
         <form id="form-avatar">
           <div class="field">
             <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp,image/gif" required />
           </div>
-          <button type="submit" class="btn">Enviar Avatar</button>
+          <button type="submit" class="btn">Enviar Imagem</button>
         </form>
       </section>
 
       <div>
         <section class="panel">
-          <h2>🧩 Widget Embutível para Sites Externos (UC10, RF14)</h2>
-          <p>Copie um dos códigos abaixo para exibir seu GuestBook em seu blog ou site pessoal:</p>
-          <label><strong>Opção 1 — Script Web Component (Shadow DOM):</strong></label>
-          <div class="code-box" id="snippet-script">${escapeAttr(scriptSnippet)}</div>
-          <button type="button" class="btn" id="btn-copy-script" style="margin:8px 0 14px">📋 Copiar Script</button>
-
-          <label style="display:block"><strong>Opção 2 — Iframe HTML:</strong></label>
-          <div class="code-box" id="snippet-iframe">${escapeAttr(iframeSnippet)}</div>
-          <button type="button" class="btn" id="btn-copy-iframe" style="margin-top:8px">📋 Copiar Iframe</button>
+          <h2>Widget Externo</h2>
+          <p>Código para embutir o mural em outro site:</p>
+          <div class="field">
+            <label>Script (Web Component):</label>
+            <div class="code-box" id="snippet-script">${escapeAttr(scriptSnippet)}</div>
+            <div><button type="button" class="btn" id="btn-copy-script">Copiar Script</button></div>
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label>Iframe:</label>
+            <div class="code-box" id="snippet-iframe">${escapeAttr(iframeSnippet)}</div>
+            <div><button type="button" class="btn" id="btn-copy-iframe">Copiar Iframe</button></div>
+          </div>
         </section>
 
         <section class="panel">
-          <h3>🔒 Alterar Senha (UC04, RF5)</h3>
+          <h3>Alterar Senha</h3>
           <form id="form-change-password">
             <div class="field">
               <label>Senha Atual</label>
@@ -402,9 +408,9 @@ function renderDashboardView(): string {
         </section>
 
         <section class="panel">
-          <h3>⚠️ Zona de Perigo (UC03, RF4, RN3)</h3>
-          <p>A exclusão remove permanentemente sua conta, seu perfil e todos os comentários recebidos.</p>
-          <button type="button" class="btn btn-danger" id="btn-delete-account">Excluir Minha Conta Permanentemente</button>
+          <h3>Encerrar Conta</h3>
+          <p>Remove sua conta, perfil e todos os recados.</p>
+          <button type="button" class="btn btn-danger" id="btn-delete-account">Excluir Conta</button>
         </section>
       </div>
     </div>
@@ -423,67 +429,63 @@ function renderProfileView(): string {
         <li class="comment-item">
           <div class="comment-meta">
             <span>
-              <strong>${c.author_name}</strong>
-              ${c.author_email ? `<span style="opacity:.7">(${c.author_email})</span>` : ''}
-              · ${new Date(c.created_at).toLocaleString('pt-BR')}
+              <strong>${escapeAttr(c.author_name)}</strong>
+              ${c.author_email ? `<span>&lt;${escapeAttr(c.author_email)}&gt;</span>` : ''}
+              - ${new Date(c.created_at).toLocaleString('pt-BR')}
             </span>
-            <span style="display:flex;gap:8px;align-items:center">
-              <button class="btn btn-like" data-id="${escapeAttr(c.id)}" data-liked="${c.liked_by_me ? '1' : '0'}" style="padding:3px 10px;font-size:.8rem">
-                ${c.liked_by_me ? '♥ Curtido' : '♡ Curtir'} (${c.likes_count})
+            <span style="display:flex;gap:6px;align-items:center">
+              <button class="btn btn-like" data-id="${escapeAttr(c.id)}" data-liked="${c.liked_by_me ? '1' : '0'}" style="padding:2px 8px;font-size:0.75rem">
+                [${c.liked_by_me ? 'Curtido' : 'Curtir'}: ${c.likes_count}]
               </button>
               ${
                 isOwner
-                  ? `<button class="btn btn-danger btn-del-comment" data-id="${escapeAttr(c.id)}" style="padding:3px 10px;font-size:.8rem">🗑️ Excluir</button>`
+                  ? `<button class="btn btn-danger btn-del-comment" data-id="${escapeAttr(c.id)}" style="padding:2px 8px;font-size:0.75rem">[Excluir]</button>`
                   : ''
               }
             </span>
           </div>
-          <div class="comment-content">${c.content}</div>
+          <div class="comment-content">${escapeAttr(c.content)}</div>
         </li>
       `
         )
         .join('')
-    : `<p>Nenhum recado ainda. Seja o primeiro a assinar este GuestBook!</p>`;
+    : `<p>Nenhum recado publicado ainda.</p>`;
 
   return `
     <div class="guestbook-themed" style="${buildThemeStyle(p.theme_config)}">
       <section class="panel">
         <div class="profile-card" style="border:none;background:transparent;padding:0">
-          ${
-            p.avatar_url
-              ? `<img class="avatar" src="${escapeAttr(p.avatar_url)}" alt="${p.display_name}" />`
-              : `<div class="avatar" style="display:flex;align-items:center;justify-content:center;font-size:2rem">👾</div>`
-          }
+          ${renderAvatar(p)}
           <div>
-            <h2 style="margin:0">${p.display_name} <span style="font-size:.95rem;opacity:.75">@${escapeAttr(p.username)}</span></h2>
-            <p style="margin:6px 0 0">${p.bio || 'Bem-vindo ao meu livro de visitas!'}</p>
+            <h2 style="margin:0;border:0;padding:0">${escapeAttr(p.display_name)} <span style="font-size:0.85rem;color:var(--muted-color);text-transform:none">@${escapeAttr(p.username)}</span></h2>
+            <p style="margin:6px 0 0">${escapeAttr(p.bio || 'Bem-vindo ao meu MineBoard.')}</p>
           </div>
         </div>
       </section>
 
       <section class="panel">
-        <h3>✍️ Assinar Livro de Visitas (RF10, RF11 — Não exige login)</h3>
+        <h3>Assinar Mural</h3>
         <form id="form-comment">
           <div class="grid-2">
             <div class="field">
-              <label>Seu Nome (opcional — em branco = "Anônimo")</label>
+              <label>Nome (opcional - padrão: Anônimo)</label>
               <input type="text" name="author_name" placeholder="Anônimo" maxlength="60" />
             </div>
             <div class="field">
-              <label>Seu E-mail de contato (opcional)</label>
+              <label>E-mail (opcional)</label>
               <input type="email" name="author_email" placeholder="contato@exemplo.com" />
             </div>
           </div>
           <div class="field">
-            <label>Sua Mensagem *</label>
-            <textarea name="content" rows="3" required maxlength="2000" placeholder="Deixe seu recado no mural..."></textarea>
+            <label>Mensagem *</label>
+            <textarea name="content" rows="3" required maxlength="2000" placeholder="Escreva seu recado..."></textarea>
           </div>
-          <button type="submit" class="btn">Publicar Recado</button>
+          <button type="submit" class="btn">Publicar</button>
         </form>
       </section>
 
       <section class="panel">
-        <h3>💬 Recados Publicados (${state.activeComments.length})</h3>
+        <h3>Recados (${state.activeComments.length})</h3>
         <ul class="comment-list">${commentsHtml}</ul>
       </section>
     </div>
@@ -543,7 +545,7 @@ function bindEvents(): void {
     setStoredToken(null);
     state.currentUser = null;
     state.myProfile = null;
-    setFlash('Sessão encerrada com sucesso.');
+    setFlash('Sessão encerrada.');
     navigate('/');
   });
 
@@ -570,7 +572,7 @@ function bindEvents(): void {
       });
       if (res.session_token) setStoredToken(res.session_token);
       await refreshSession();
-      setFlash('Conta e GuestBook criados com sucesso!');
+      setFlash('Conta criada com sucesso.');
       navigate(`/u/${res.profile.username}`);
     } catch (err) {
       setFlash(err instanceof Error ? err.message : 'Erro ao criar conta.', true);
@@ -585,7 +587,7 @@ function bindEvents(): void {
       setStoredToken(res.session_token);
       state.currentUser = res.user;
       state.myProfile = res.profile;
-      setFlash('Login realizado com sucesso!');
+      setFlash('Login realizado.');
       navigate('/dashboard');
     } catch (err) {
       setFlash(err instanceof Error ? err.message : 'Falha no login.', true);
@@ -627,15 +629,15 @@ function bindEvents(): void {
         display_name: String(fd.get('display_name') || ''),
         bio: String(fd.get('bio') || ''),
         theme_config: {
-          background_color: String(fd.get('background_color') || '#121212'),
-          card_background: String(fd.get('card_background') || '#1e1e1e'),
-          text_color: String(fd.get('text_color') || '#e0e0e0'),
-          accent_color: String(fd.get('accent_color') || '#00ffcc'),
-          font_family: String(fd.get('font_family') || 'monospace'),
+          background_color: String(fd.get('background_color') || '#111111'),
+          card_background: String(fd.get('card_background') || '#181818'),
+          text_color: String(fd.get('text_color') || '#d4d4d4'),
+          accent_color: String(fd.get('accent_color') || '#cccccc'),
+          font_family: String(fd.get('font_family') || 'Courier New'),
         },
       });
       state.myProfile = res.profile;
-      setFlash('Perfil e tema retrô atualizados!');
+      setFlash('Perfil atualizado.');
     } catch (err) {
       setFlash(err instanceof Error ? err.message : 'Erro ao atualizar perfil.', true);
     }
@@ -651,7 +653,7 @@ function bindEvents(): void {
     try {
       const res = await api.uploadAvatar(state.myProfile.username, file);
       state.myProfile.avatar_url = res.avatar_url;
-      setFlash('Foto de perfil atualizada no Cloudflare R2!');
+      setFlash('Avatar atualizado.');
     } catch (err) {
       setFlash(err instanceof Error ? err.message : 'Erro no upload do avatar.', true);
     }
@@ -660,13 +662,13 @@ function bindEvents(): void {
   document.getElementById('btn-copy-script')?.addEventListener('click', () => {
     const text = document.getElementById('snippet-script')?.textContent || '';
     void navigator.clipboard?.writeText(text);
-    setFlash('Código <script> do widget copiado para a área de transferência!');
+    setFlash('Código script copiado.');
   });
 
   document.getElementById('btn-copy-iframe')?.addEventListener('click', () => {
     const text = document.getElementById('snippet-iframe')?.textContent || '';
     void navigator.clipboard?.writeText(text);
-    setFlash('Código <iframe> do widget copiado para a área de transferência!');
+    setFlash('Código iframe copiado.');
   });
 
   document.getElementById('form-change-password')?.addEventListener('submit', async (e) => {
@@ -685,7 +687,7 @@ function bindEvents(): void {
 
   document.getElementById('btn-delete-account')?.addEventListener('click', async () => {
     if (!state.myProfile) return;
-    if (!window.confirm('Tem certeza? Sua conta, perfil e comentários serão excluídos permanentemente (RN3).')) {
+    if (!window.confirm('Tem certeza? Sua conta, perfil e comentários serão excluídos permanentemente.')) {
       return;
     }
     try {
@@ -693,7 +695,7 @@ function bindEvents(): void {
       setStoredToken(null);
       state.currentUser = null;
       state.myProfile = null;
-      setFlash('Sua conta e todos os dados associados foram excluídos permanentemente.');
+      setFlash('Conta excluída.');
       navigate('/');
     } catch (err) {
       setFlash(err instanceof Error ? err.message : 'Erro ao excluir conta.', true);
@@ -713,7 +715,7 @@ function bindEvents(): void {
       });
       state.activeComments = [res.comment, ...state.activeComments];
       form.reset();
-      setFlash('Recado publicado no mural!');
+      setFlash('Recado publicado.');
     } catch (err) {
       setFlash(err instanceof Error ? err.message : 'Erro ao publicar recado.', true);
     }
@@ -741,7 +743,7 @@ function bindEvents(): void {
       try {
         await api.deleteComment(id);
         state.activeComments = state.activeComments.filter((c) => c.id !== id);
-        setFlash('Comentário excluído com sucesso (RF12, RN10).');
+        setFlash('Comentário excluído.');
       } catch (err) {
         setFlash(err instanceof Error ? err.message : 'Erro ao excluir comentário.', true);
       }
