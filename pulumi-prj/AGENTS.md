@@ -7,9 +7,11 @@
 - **Stacks Configuradas:** `dev` (`Pulumi.dev.yaml`) e `prod` (`Pulumi.prod.yaml`)
 
 ## Recursos Provisionados (`__main__.py`)
-1. **`cloudflare.DnsRecord` (`dns-record-<stack>`):** Registro DNS principal do ambiente (`dev.nicolaspitz.dev` / `preview-prod.nicolaspitz.dev`) com proxy da Cloudflare ativo (`proxied=True`).
-2. **`cloudflare.DnsRecord` (`dns-wildcard-<stack>`):** Registro DNS Wildcard (`*.dev.nicolaspitz.dev` / `*.preview-prod.nicolaspitz.dev`) para permitir subdomínios dinâmicos por usuário (`<username>.nicolaspitz.dev`, conforme **RN2**).
+1. **`cloudflare.DnsRecord` (`dns-record-<stack>`):** Registro DNS principal do ambiente (`dev.nicolaspitz.dev` / `preview-prod.nicolaspitz.dev` ou `@` para domínio raiz) com proxy da Cloudflare ativo (`proxied=True`).
+2. **`cloudflare.DnsRecord` (`dns-wildcard-<stack>`):** Registro DNS Wildcard (`*.dev.nicolaspitz.dev` / `*.preview-prod.nicolaspitz.dev` ou `*`) para permitir subdomínios dinâmicos por usuário (`<username>.nicolaspitz.dev`, conforme **RN2**).
 3. **`cloudflare.WorkersRoute` (`worker-route-<stack>` e `worker-wildcard-route-<stack>`):** Roteamento de borda conectando o domínio e os subdomínios wildcard ao script do Cloudflare Worker correspondente (`guestbook-backend-dev` / `guestbook-backend-prod`).
+4. **`cloudflare.R2Bucket` (`r2-avatars-<stack>`):** Bucket do Cloudflare R2 (`guestbook-avatars-dev` / `guestbook-avatars-prod`) para armazenar fotos de perfil e assets de estilização (**RF3**).
+5. **`cloudflare.PagesProject` (`pages-frontend-<stack>`):** Projeto do Cloudflare Pages (`mineboard-guestbook-dev` / `mineboard-guestbook-prod`) para hospedar o frontend estático compilado de `/frontend/dist`.
 
 ## Comandos Principais
 ```bash
