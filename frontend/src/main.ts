@@ -2,6 +2,7 @@ import {
   api,
   AuthUser,
   CommentItem,
+  CONFIGURED_ROOT_DOMAIN,
   Profile,
   setStoredToken,
   ThemeConfig,
@@ -129,10 +130,10 @@ async function handleRoute(): Promise<void> {
   const isBaseDomain =
     hostname === 'localhost' ||
     hostname === '127.0.0.1' ||
-    hostname === 'nicolaspitz.dev' ||
-    hostname === 'www.nicolaspitz.dev' ||
-    hostname === 'dev.nicolaspitz.dev' ||
-    hostname === 'preview-prod.nicolaspitz.dev' ||
+    hostname === CONFIGURED_ROOT_DOMAIN ||
+    hostname === `www.${CONFIGURED_ROOT_DOMAIN}` ||
+    hostname === `dev.${CONFIGURED_ROOT_DOMAIN}` ||
+    hostname === `preview-prod.${CONFIGURED_ROOT_DOMAIN}` ||
     hostname.endsWith('.pages.dev') ||
     hostname.endsWith('.workers.dev');
 

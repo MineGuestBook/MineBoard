@@ -1,4 +1,4 @@
-name: CD — Deploy Cloudflare (Pulumi + Workers + Pages)
+name: CD — Deploy & Destroy Cloudflare (Pulumi + Workers + Pages)
 
 on:
   push:
@@ -6,21 +6,57 @@ on:
       - dev
       - main
   workflow_dispatch:
+    inputs:
+      action:
+        description: "Operação a executar (deploy ou destroy)"
+        required: true
+        default: "deploy"
+        type: choice
+        options:
+          - deploy
+          - destroy
+      environment:
+        description: "Ambiente alvo (dev ou prod)"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
 
 concurrency:
-  group: cd-${{ github.ref }}
+  group: cd-${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy Stack (${{ github.ref_name == 'main' && 'prod' || 'dev' }})
+  cd:
+    name: ${{ (github.event.inputs.action || 'deploy') == 'destroy' && 'Destroy' || 'Deploy' }} Stack (${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }})
     runs-on: ubuntu-latest
     env:
-      TARGET_ENV: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+      ACTION: ${{ github.event.inputs.action || 'deploy' }}
+      TARGET_ENV: ${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
+      PRODUCTION_BRANCH: ${{ (github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev')) == 'prod' && 'main' || 'dev' }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID || '3b7f09ab1c9fbe248bdb4cdfd67cb8b6' }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID || vars.CLOUDFLARE_ZONE_ID || 'bb592384462f132dc22c112697f29ab6' }}
       PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+      ROOT_DOMAIN: ${{ vars.ROOT_DOMAIN || 'nicolaspitz.dev' }}
+      SUBDOMAIN: ${{ (github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev')) == 'prod' && (vars.PROD_SUBDOMAIN || 'preview-prod') || (vars.DEV_SUBDOMAIN || 'dev') }}
+      PAGES_PROJECT_NAME: ${{ vars.PAGES_PROJECT_PREFIX || 'mineboard-guestbook' }}-${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
+      PAGES_ORIGIN_HOST: ${{ vars.PAGES_ORIGIN_HOST }}
+      MONGODB_URI: ${{ secrets.MONGODB_URI }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      SETUP_TOKEN: ${{ secrets.SETUP_TOKEN }}
     steps:
+      - name: Validar credenciais obrigatórias da Cloudflare
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::error::Secret CLOUDFLARE_API_TOKEN não configurado nas GitHub Actions Secrets."
+            exit 1
+          fi
+
       - name: Checkout repositório
         uses: actions/checkout@v4
 
@@ -30,30 +66,109 @@ jobs:
           node-version: 22
 
       - name: Instalar uv e Python para Pulumi
+        if: env.PULUMI_ACCESS_TOKEN != ''
         uses: astral-sh/setup-uv@v4
 
       - name: Instalar Pulumi CLI
+        if: env.PULUMI_ACCESS_TOKEN != ''
         uses: pulumi/actions@v6
 
-      - name: Provisionar Infraestrutura Cloudflare via Pulumi (${{ env.TARGET_ENV }})
-        if: env.PULUMI_ACCESS_TOKEN != '' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: pulumi-prj
-        run: |
-          uv sync
-          uv run pulumi stack select "${TARGET_ENV}"
-          uv run pulumi up --stack "${TARGET_ENV}" --yes
-
-      - name: Deploy do Backend no Cloudflare Workers (${{ env.TARGET_ENV }})
-        if: env.CLOUDFLARE_API_TOKEN != ''
+      - name: Garantir bucket R2 de avatares caso Pulumi não esteja ativo (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN == ''
         working-directory: backend
         run: |
           npm ci
-          npx wrangler deploy --env "${TARGET_ENV}"
+          BUCKET_NAME="guestbook-avatars-${TARGET_ENV}"
+          if ! npx wrangler r2 bucket list | grep -qw "${BUCKET_NAME}"; then
+            npx wrangler r2 bucket create "${BUCKET_NAME}" || true
+          fi
+
+      - name: Provisionar Infraestrutura Cloudflare via Pulumi (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN != ''
+        working-directory: pulumi-prj
+        run: |
+          uv sync
+          uv run pulumi stack select --create "${TARGET_ENV}"
+          uv run pulumi config set accountId "${CLOUDFLARE_ACCOUNT_ID}" --stack "${TARGET_ENV}"
+          uv run pulumi config set zoneId "${CLOUDFLARE_ZONE_ID}" --stack "${TARGET_ENV}"
+          uv run pulumi config set domain "${ROOT_DOMAIN}" --stack "${TARGET_ENV}"
+          uv run pulumi config set subdomain "${SUBDOMAIN}" --stack "${TARGET_ENV}"
+          uv run pulumi config set pagesProjectName "${PAGES_PROJECT_NAME}" --stack "${TARGET_ENV}"
+          # Em conta zerada, garante o bucket R2 primeiro caso o Worker ainda não exista para as rotas
+          uv run pulumi up --stack "${TARGET_ENV}" --target "urn:pulumi:${TARGET_ENV}::pulumi-prj::cloudflare:index/r2Bucket:R2Bucket::r2-avatars-${TARGET_ENV}" --yes || true
+
+      - name: Deploy do Backend no Cloudflare Workers (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy'
+        working-directory: backend
+        run: |
+          npm ci
+          if [ "${SUBDOMAIN}" = "@" ] || [ -z "${SUBDOMAIN}" ]; then
+            COMPUTED_APP_URL="https://${ROOT_DOMAIN}"
+          else
+            COMPUTED_APP_URL="https://${SUBDOMAIN}.${ROOT_DOMAIN}"
+          fi
+          COMPUTED_PAGES_ORIGIN="${PAGES_ORIGIN_HOST:-https://${PAGES_PROJECT_NAME}.pages.dev}"
+
+          npx wrangler deploy --env "${TARGET_ENV}" \
+            --var "ROOT_DOMAIN:${ROOT_DOMAIN}" \
+            --var "APP_URL:${COMPUTED_APP_URL}" \
+            --var "PAGES_ORIGIN:${COMPUTED_PAGES_ORIGIN}"
+
+      - name: Sincronizar Secrets do Worker (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy'
+        working-directory: backend
+        run: |
+          node -e '
+            const keys = ["MONGODB_URI", "RESEND_API_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SETUP_TOKEN"];
+            const out = {};
+            for (const k of keys) {
+              if (process.env[k]) out[k] = process.env[k];
+            }
+            if (Object.keys(out).length > 0) {
+              require("fs").writeFileSync(".secrets.json", JSON.stringify(out));
+              console.log("Sincronizando secrets:", Object.keys(out).join(", "));
+            }
+          '
+          if [ -f .secrets.json ]; then
+            npx wrangler secret bulk .secrets.json --env "${TARGET_ENV}"
+            rm -f .secrets.json
+          fi
+
+      - name: Aplicar DNS, Rotas do Worker e Projeto Pages via Pulumi (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN != ''
+        working-directory: pulumi-prj
+        run: |
+          uv run pulumi up --stack "${TARGET_ENV}" --yes
+
+      - name: Garantir projeto Cloudflare Pages (${{ env.PAGES_PROJECT_NAME }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN == ''
+        working-directory: backend
+        run: |
+          if ! npx wrangler pages project list | grep -qw "${PAGES_PROJECT_NAME}"; then
+            npx wrangler pages project create "${PAGES_PROJECT_NAME}" --production-branch "${PRODUCTION_BRANCH}"
+          fi
 
       - name: Build e Deploy do Frontend no Cloudflare Pages (${{ env.TARGET_ENV }})
-        if: env.CLOUDFLARE_API_TOKEN != ''
+        if: env.ACTION == 'deploy'
         working-directory: frontend
+        env:
+          VITE_ROOT_DOMAIN: ${{ env.ROOT_DOMAIN }}
         run: |
           npm ci
           npm run build
-          npx wrangler pages deploy dist --project-name "mineboard-guestbook-${TARGET_ENV}"
+          npx --yes wrangler pages deploy dist \
+            --project-name "${PAGES_PROJECT_NAME}" \
+            --branch "${PRODUCTION_BRANCH}" \
+            --commit-dirty=true
+
+      - name: Destruir Infraestrutura Cloudflare via Pulumi (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'destroy'
+        working-directory: pulumi-prj
+        run: |
+          if [ -z "${PULUMI_ACCESS_TOKEN}" ]; then
+            echo "::error::Secret PULUMI_ACCESS_TOKEN é obrigatório para executar pulumi destroy."
+            exit 1
+          fi
+          uv sync
+          uv run pulumi stack select "${TARGET_ENV}"
+          uv run pulumi destroy --stack "${TARGET_ENV}" --yes

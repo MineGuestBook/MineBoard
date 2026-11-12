@@ -1,16 +1,18 @@
+import os
 import pulumi
 import pulumi_cloudflare as cloudflare
 
-# Carrega as configurações da stack ativa (dev ou prod)
+# Carrega as configurações da stack ativa (dev ou prod), permitindo override via variáveis de ambiente no CI/CD
 config = pulumi.Config()
-account_id = config.require("accountId")
-zone_id = config.require("zoneId")
-subdomain = config.require("subdomain")
-domain = config.get("domain") or "nicolaspitz.dev"
+account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID") or config.require("accountId")
+zone_id = os.getenv("CLOUDFLARE_ZONE_ID") or config.require("zoneId")
+domain = os.getenv("ROOT_DOMAIN") or config.get("domain") or "nicolaspitz.dev"
 current_stack = pulumi.get_stack()
-worker_script = config.get("workerScript") or f"guestbook-backend-{current_stack}"
-r2_bucket_name = config.get("r2BucketName") or f"guestbook-avatars-{current_stack}"
-pages_project_name = config.get("pagesProjectName") or f"mineboard-guestbook-{current_stack}"
+default_subdomain = "preview-prod" if current_stack == "prod" else "dev"
+subdomain = os.getenv("SUBDOMAIN") or config.get("subdomain") or default_subdomain
+worker_script = os.getenv("WORKER_SCRIPT") or config.get("workerScript") or f"guestbook-backend-{current_stack}"
+r2_bucket_name = os.getenv("R2_BUCKET_NAME") or config.get("r2BucketName") or f"guestbook-avatars-{current_stack}"
+pages_project_name = os.getenv("PAGES_PROJECT_NAME") or config.get("pagesProjectName") or f"mineboard-guestbook-{current_stack}"
 production_branch = "main" if current_stack == "prod" else "dev"
 
 # Suporta tanto domínio raiz (subdomain="@") quanto subdomínio dedicado (ex: dev.nicolaspitz.dev)
