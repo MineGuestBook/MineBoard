@@ -40,6 +40,9 @@ export interface AuthUser {
 const SESSION_STORAGE_KEY = 'guestbook_session_token';
 const FINGERPRINT_STORAGE_KEY = 'guestbook_origin_fingerprint';
 
+const envMeta = (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
+export const CONFIGURED_ROOT_DOMAIN = (envMeta.VITE_ROOT_DOMAIN || 'nicolaspitz.dev').toLowerCase();
+
 export function getStoredToken(): string | null {
   try {
     return localStorage.getItem(SESSION_STORAGE_KEY);
@@ -75,11 +78,14 @@ export function getClientFingerprint(): string {
 
 function resolveApiBase(): string {
   if (typeof window === 'undefined') return '';
+  if (envMeta.VITE_API_BASE_URL) {
+    return envMeta.VITE_API_BASE_URL.replace(/\/+$/, '');
+  }
   const host = window.location.hostname.toLowerCase();
   if (host.endsWith('.pages.dev')) {
     return host.includes('-prod')
-      ? 'https://preview-prod.nicolaspitz.dev'
-      : 'https://dev.nicolaspitz.dev';
+      ? `https://preview-prod.${CONFIGURED_ROOT_DOMAIN}`
+      : `https://dev.${CONFIGURED_ROOT_DOMAIN}`;
   }
   return '';
 }
