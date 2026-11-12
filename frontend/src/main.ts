@@ -152,8 +152,12 @@ async function handleRoute(): Promise<void> {
     }
   }
 
-  const list = await api.listProfiles(state.searchQuery).catch(() => ({ profiles: [] }));
-  state.profiles = list.profiles;
+  if (state.searchQuery.trim()) {
+    const list = await api.listProfiles(state.searchQuery).catch(() => ({ profiles: [] }));
+    state.profiles = list.profiles;
+  } else {
+    state.profiles = [];
+  }
   state.view = { type: 'home' };
   render();
 }
@@ -199,22 +203,31 @@ function renderTopbar(): string {
 }
 
 function renderHomeView(): string {
-  const cards = state.profiles.length
-    ? state.profiles
-        .map(
-          (p) => `
-        <div class="profile-card">
-          ${renderAvatar(p)}
-          <div style="flex:1">
-            <div><strong>${escapeAttr(p.display_name)}</strong> <span style="color:var(--muted-color)">@${escapeAttr(p.username)}</span></div>
-            <div style="font-size:0.82rem;color:var(--muted-color);margin:4px 0 8px">${escapeAttr(p.bio || 'Sem descrição.')}</div>
-            <button class="btn" data-nav="/u/${escapeAttr(p.username)}">Abrir mural -&gt;</button>
-          </div>
-        </div>
-      `
-        )
-        .join('')
-    : `<p>Nenhum perfil encontrado.</p>`;
+  const hasSearch = state.searchQuery.trim().length > 0;
+  const searchResultsHtml = hasSearch
+    ? `
+    <div class="grid-2" style="margin-top:14px">
+      ${
+        state.profiles.length
+          ? state.profiles
+              .map(
+                (p) => `
+              <div class="profile-card">
+                ${renderAvatar(p)}
+                <div style="flex:1">
+                  <div><strong>${escapeAttr(p.display_name)}</strong> <span style="color:var(--muted-color)">@${escapeAttr(p.username)}</span></div>
+                  <div style="font-size:0.82rem;color:var(--muted-color);margin:4px 0 8px">${escapeAttr(p.bio || 'Sem descrição.')}</div>
+                  <button class="btn" data-nav="/u/${escapeAttr(p.username)}">Abrir mural -&gt;</button>
+                </div>
+              </div>
+            `
+              )
+              .join('')
+          : `<p>Nenhum perfil encontrado.</p>`
+      }
+    </div>
+  `
+    : '';
 
   return `
     <section class="panel">
@@ -224,10 +237,7 @@ function renderHomeView(): string {
         <input type="text" id="input-search" value="${escapeAttr(state.searchQuery)}" placeholder="Buscar por @username ou nome..." style="flex:1;padding:6px 8px;background:#0d0d0d;color:var(--text-color);border:1px solid var(--border-color);font-family:inherit" />
         <button type="submit" class="btn">Buscar</button>
       </form>
-    </section>
-    <section class="panel">
-      <h3>Perfis Públicos (${state.profiles.length})</h3>
-      <div class="grid-2">${cards}</div>
+      ${searchResultsHtml}
     </section>
   `;
 }
@@ -553,7 +563,12 @@ function bindEvents(): void {
   document.getElementById('form-search')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const input = document.getElementById('input-search') as HTMLInputElement | null;
-    state.searchQuery = input?.value || '';
+    state.searchQuery = (input?.value || '').trim();
+    if (!state.searchQuery) {
+      state.profiles = [];
+      render();
+      return;
+    }
     const res = await api.listProfiles(state.searchQuery);
     state.profiles = res.profiles;
     render();
