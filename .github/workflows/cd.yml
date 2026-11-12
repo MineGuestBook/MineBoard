@@ -73,6 +73,16 @@ jobs:
         if: env.PULUMI_ACCESS_TOKEN != ''
         uses: pulumi/actions@v6
 
+      - name: Garantir bucket R2 de avatares caso Pulumi não esteja ativo (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN == ''
+        working-directory: backend
+        run: |
+          npm ci
+          BUCKET_NAME="guestbook-avatars-${TARGET_ENV}"
+          if ! npx wrangler r2 bucket list | grep -qw "${BUCKET_NAME}"; then
+            npx wrangler r2 bucket create "${BUCKET_NAME}" || true
+          fi
+
       - name: Provisionar Infraestrutura Cloudflare via Pulumi (${{ env.TARGET_ENV }})
         if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN != ''
         working-directory: pulumi-prj
@@ -84,21 +94,14 @@ jobs:
           uv run pulumi config set domain "${ROOT_DOMAIN}" --stack "${TARGET_ENV}"
           uv run pulumi config set subdomain "${SUBDOMAIN}" --stack "${TARGET_ENV}"
           uv run pulumi config set pagesProjectName "${PAGES_PROJECT_NAME}" --stack "${TARGET_ENV}"
-          uv run pulumi up --stack "${TARGET_ENV}" --yes
-
-      - name: Garantir projeto Cloudflare Pages (${{ env.PAGES_PROJECT_NAME }})
-        if: env.ACTION == 'deploy'
-        working-directory: backend
-        run: |
-          npm ci
-          if ! npx wrangler pages project list | grep -qw "${PAGES_PROJECT_NAME}"; then
-            npx wrangler pages project create "${PAGES_PROJECT_NAME}" --production-branch "${PRODUCTION_BRANCH}"
-          fi
+          # Em conta zerada, garante o bucket R2 primeiro caso o Worker ainda não exista para as rotas
+          uv run pulumi up --stack "${TARGET_ENV}" --target "urn:pulumi:${TARGET_ENV}::pulumi-prj::cloudflare:index/r2Bucket:R2Bucket::r2-avatars-${TARGET_ENV}" --yes || true
 
       - name: Deploy do Backend no Cloudflare Workers (${{ env.TARGET_ENV }})
         if: env.ACTION == 'deploy'
         working-directory: backend
         run: |
+          npm ci
           if [ "${SUBDOMAIN}" = "@" ] || [ -z "${SUBDOMAIN}" ]; then
             COMPUTED_APP_URL="https://${ROOT_DOMAIN}"
           else
@@ -129,6 +132,20 @@ jobs:
           if [ -f .secrets.json ]; then
             npx wrangler secret bulk .secrets.json --env "${TARGET_ENV}"
             rm -f .secrets.json
+          fi
+
+      - name: Aplicar DNS, Rotas do Worker e Projeto Pages via Pulumi (${{ env.TARGET_ENV }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN != ''
+        working-directory: pulumi-prj
+        run: |
+          uv run pulumi up --stack "${TARGET_ENV}" --yes
+
+      - name: Garantir projeto Cloudflare Pages (${{ env.PAGES_PROJECT_NAME }})
+        if: env.ACTION == 'deploy' && env.PULUMI_ACCESS_TOKEN == ''
+        working-directory: backend
+        run: |
+          if ! npx wrangler pages project list | grep -qw "${PAGES_PROJECT_NAME}"; then
+            npx wrangler pages project create "${PAGES_PROJECT_NAME}" --production-branch "${PRODUCTION_BRANCH}"
           fi
 
       - name: Build e Deploy do Frontend no Cloudflare Pages (${{ env.TARGET_ENV }})
