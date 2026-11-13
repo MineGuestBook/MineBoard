@@ -3,6 +3,7 @@ import {
   AuthUser,
   CommentItem,
   CONFIGURED_ROOT_DOMAIN,
+  getStoredToken,
   Profile,
   setStoredToken,
   ThemeConfig,
@@ -67,6 +68,17 @@ function navigate(path: string): void {
 }
 
 async function refreshSession(): Promise<void> {
+  const isBaseHost =
+    window.location.hostname === 'localhost' ||
+    window.location.hostname.endsWith('.pages.dev') ||
+    window.location.hostname.endsWith('.workers.dev');
+  // Se estiver em domínio sem cookie cross-subdomain e não houver token salvo no localStorage,
+  // evita uma chamada HTTP desnecessária ao /api/auth/me
+  if (isBaseHost && !getStoredToken() && !document.cookie) {
+    state.currentUser = null;
+    state.myProfile = null;
+    return;
+  }
   try {
     const me = await api.getMe();
     state.currentUser = me.user;

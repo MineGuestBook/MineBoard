@@ -73,8 +73,13 @@ const requestScope = new AsyncLocalStorage<RequestDbScope>();
 
 /**
  * Executa `fn` dentro de um escopo de conexão por requisição e fecha o client ao final.
+ * Quando `executionCtx.waitUntil` está disponível (produção no Cloudflare Workers), o fechamento
+ * do socket ocorre em background para não adicionar um RTT extra de TCP FIN à resposta HTTP.
  */
-export async function withRequestDatabaseScope<T>(fn: () => Promise<T>): Promise<T> {
+export async function withRequestDatabaseScope<T>(
+  fn: () => Promise<T>,
+  waitUntil?: (promise: Promise<unknown>) => void
+): Promise<T> {
   const scope: RequestDbScope = { pending: null };
   try {
     return await requestScope.run(scope, fn);
@@ -82,7 +87,16 @@ export async function withRequestDatabaseScope<T>(fn: () => Promise<T>): Promise
     if (scope.pending) {
       const pending = scope.pending;
       scope.pending = null;
-      await pending.then(({ client }) => client.close(true)).catch(() => undefined);
+      const closePromise = pending.then(({ client }) => client.close(true)).catch(() => undefined);
+      if (waitUntil) {
+        try {
+          waitUntil(closePromise);
+        } catch {
+          await closePromise;
+        }
+      } else {
+        await closePromise;
+      }
     }
   }
 }

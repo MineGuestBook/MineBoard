@@ -20,7 +20,9 @@ import {
   clearSessionCookie,
   createSessionForUser,
   extractSessionToken,
+  invalidateSessionCache,
   resolveAuthenticatedUser,
+  resolveAuthenticatedUserCached,
 } from '../utils/session';
 import { logAuditEvent } from '../utils/audit';
 import { getAppUrl, sendPasswordResetEmail } from '../utils/email';
@@ -78,8 +80,8 @@ authRouter.post('/login', async (c) => {
         .updateOne({ _id: user._id }, { $set: { password_hash: await hashPassword(password), updated_at: new Date() } });
     }
 
-    const session = await createSessionForUser(c, db, user._id);
     const profile = await db.collection<Profile>('profiles').findOne({ user_id: user._id });
+    const session = await createSessionForUser(c, db, user._id, { user, profile });
     await logAuditEvent(db, 'auth.login', { user_id: user._id, profile_id: profile?._id ?? null, ip_hash: ipHash });
 
     return c.json({
@@ -101,11 +103,15 @@ authRouter.post('/login', async (c) => {
  */
 authRouter.post('/logout', async (c) => {
   try {
-    if (extractSessionToken(c)) {
+    const rawToken = extractSessionToken(c);
+    if (rawToken) {
+      const tokenHash = await hashSha256(rawToken);
+      await invalidateSessionCache(tokenHash);
       const { db } = await getDatabase(c.env);
       const auth = await resolveAuthenticatedUser(c, db);
       if (auth) {
         await db.collection<Session>('sessions').deleteOne({ _id: auth.session._id });
+        await invalidateSessionCache(auth.session._id);
         await logAuditEvent(db, 'auth.logout', { user_id: auth.user._id });
       }
     }
@@ -119,15 +125,14 @@ authRouter.post('/logout', async (c) => {
 
 /**
  * GET /api/auth/me
- * Retorna o usuário autenticado e seu perfil.
+ * Retorna o usuário autenticado e seu perfil (com hit em memória / Edge Cache sem abrir socket no MongoDB).
  */
 authRouter.get('/me', async (c) => {
   try {
     if (!extractSessionToken(c)) {
       return c.json({ authenticated: false, error: 'Não autenticado.' }, 401);
     }
-    const { db } = await getDatabase(c.env);
-    const auth = await resolveAuthenticatedUser(c, db);
+    const auth = await resolveAuthenticatedUserCached(c);
     if (!auth) {
       return c.json({ authenticated: false, error: 'Não autenticado.' }, 401);
     }
@@ -178,6 +183,7 @@ authRouter.post('/change-password', async (c) => {
 
     // Encerra as demais sessões do usuário, mantendo a atual
     await db.collection<Session>('sessions').deleteMany({ user_id: auth.user._id, _id: { $ne: auth.session._id } });
+    await invalidateSessionCache();
     await logAuditEvent(db, 'auth.password_changed', { user_id: auth.user._id });
 
     return c.json({ message: 'Senha alterada com sucesso.' });
@@ -285,6 +291,7 @@ authRouter.post('/reset-password', async (c) => {
         { $set: { password_hash: await hashPassword(newPassword as string), updated_at: new Date() } }
       );
     await db.collection<Session>('sessions').deleteMany({ user_id: resetToken.user_id });
+    await invalidateSessionCache();
     await logAuditEvent(db, 'auth.password_reset_completed', { user_id: resetToken.user_id });
 
     return c.json({ message: 'Senha redefinida com sucesso. Faça login com a nova senha.' });
@@ -451,7 +458,7 @@ authRouter.get('/google/callback', async (c) => {
       });
     }
 
-    await createSessionForUser(c, db, user._id!);
+    await createSessionForUser(c, db, user._id!, { user });
     const { ipHash } = await getClientIdentity(c.req.raw);
     await logAuditEvent(db, 'auth.oauth_login', { user_id: user._id, ip_hash: ipHash, provider: 'google', created });
 

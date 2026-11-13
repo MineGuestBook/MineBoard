@@ -15,7 +15,13 @@ import {
   validatePassword,
   validateUsername,
 } from '../utils/security';
-import { authorizeProfileOwner, createSessionForUser } from '../utils/session';
+import {
+  authorizeProfileOwner,
+  cacheSessionContext,
+  createSessionForUser,
+  extractSessionToken,
+  invalidateSessionCache,
+} from '../utils/session';
 import { logAuditEvent } from '../utils/audit';
 
 export const profilesRouter = new Hono<{ Bindings: Env }>();
@@ -90,8 +96,8 @@ export function serializeComment(comment: Comment, currentFingerprint?: string) 
   };
 }
 
-const PUBLIC_CACHE_TTL_MS = 60_000;
-const EDGE_CACHE_TTL_SECONDS = 60;
+const PUBLIC_CACHE_TTL_MS = 5 * 60_000;
+const EDGE_CACHE_TTL_SECONDS = 300;
 const EDGE_CACHE_ORIGIN = 'https://cache.guestbook.internal';
 const profileListCache = new Map<string, { expiresAt: number; profiles: Profile[] }>();
 const profileDetailCache = new Map<string, { expiresAt: number; profile: Profile; comments: Comment[] }>();
@@ -452,8 +458,8 @@ profilesRouter.post('/', async (c) => {
       themeConfig: sanitizeThemeConfig(body.theme_config),
     });
 
-    // Autentica automaticamente após o cadastro (UC01)
-    const session = await createSessionForUser(c, db, user._id!);
+    // Autentica automaticamente após o cadastro (UC01) e pré-popula o cache de sessão
+    const session = await createSessionForUser(c, db, user._id!, { user, profile });
     const { ipHash } = await getClientIdentity(c.req.raw);
     await logAuditEvent(db, 'account.created', {
       user_id: user._id,
@@ -565,7 +571,13 @@ profilesRouter.patch('/:username', async (c) => {
 
     await db.collection<Profile>('profiles').updateOne({ _id: existing._id }, { $set: updates });
     await invalidatePublicCache(existing.username);
-    const updated = await db.collection<Profile>('profiles').findOne({ _id: existing._id });
+    const updated = { ...existing, ...updates };
+    if (authz.auth) {
+      await cacheSessionContext(authz.auth.session._id, {
+        ...authz.auth,
+        profile: updated,
+      });
+    }
 
     await logAuditEvent(db, 'profile.updated', {
       user_id: existing.user_id,
@@ -647,10 +659,17 @@ profilesRouter.post('/:username/avatar', async (c) => {
     }
 
     const avatarUrl = `${new URL(c.req.url).origin}/api/avatars/${key}`;
+    const updatedAt = new Date();
     await db
       .collection<Profile>('profiles')
-      .updateOne({ _id: profile._id }, { $set: { avatar_url: avatarUrl, updated_at: new Date() } });
+      .updateOne({ _id: profile._id }, { $set: { avatar_url: avatarUrl, updated_at: updatedAt } });
     await invalidatePublicCache(profile.username);
+    if (authz.auth) {
+      await cacheSessionContext(authz.auth.session._id, {
+        ...authz.auth,
+        profile: { ...profile, avatar_url: avatarUrl, updated_at: updatedAt },
+      });
+    }
 
     await logAuditEvent(db, 'profile.avatar_uploaded', {
       user_id: profile.user_id,
@@ -694,6 +713,7 @@ profilesRouter.delete('/:username', async (c) => {
       return c.json({ error: authz.error }, authz.status);
     }
 
+    const rawToken = extractSessionToken(c);
     const [commentsDeleteResult] = await Promise.all([
       db.collection('comments').deleteMany({ profile_id: profile._id }),
       db.collection('sessions').deleteMany({ user_id: profile.user_id }),
@@ -702,6 +722,10 @@ profilesRouter.delete('/:username', async (c) => {
       db.collection('users').deleteOne({ _id: profile.user_id }),
     ]);
     await invalidatePublicCache(profile.username);
+    await invalidateSessionCache(authz.auth?.session._id);
+    if (rawToken && !authz.auth) {
+      await invalidateSessionCache();
+    }
 
     const avatarKey = extractAvatarKey(profile.avatar_url);
     if (avatarKey && c.env.AVATARS_BUCKET) {

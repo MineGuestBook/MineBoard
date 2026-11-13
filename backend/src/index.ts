@@ -24,8 +24,19 @@ const app = new Hono<{ Bindings: Env }>();
 // Sem `credentials`, navegadores não enviam cookies de sessão em requisições cross-origin.
 app.use('/api/*', cors());
 
-// Uma única conexão MongoDB por requisição, fechada ao final (evita vazamento de conexões no Atlas)
-app.use('*', (_c, next) => withRequestDatabaseScope(() => next()));
+// Uma única conexão MongoDB por requisição, fechada ao final (via waitUntil quando disponível)
+app.use('*', (c, next) => {
+  let boundWaitUntil: ((promise: Promise<unknown>) => void) | undefined;
+  try {
+    const ctx = c.executionCtx;
+    if (ctx && typeof ctx.waitUntil === 'function') {
+      boundWaitUntil = (p) => ctx.waitUntil(p);
+    }
+  } catch {
+    // Contexto de teste sem ExecutionContext
+  }
+  return withRequestDatabaseScope(() => next(), boundWaitUntil);
+});
 
 /**
  * Protege rotas administrativas em produção: exige header `X-Setup-Token` igual ao secret `SETUP_TOKEN`.
