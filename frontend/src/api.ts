@@ -39,9 +39,104 @@ export interface AuthUser {
 
 const SESSION_STORAGE_KEY = 'guestbook_session_token';
 const FINGERPRINT_STORAGE_KEY = 'guestbook_origin_fingerprint';
+const AUTH_SNAPSHOT_STORAGE_KEY = 'guestbook_auth_snapshot_v1';
+const PROFILE_CACHE_STORAGE_KEY = 'guestbook_profiles_cache_v1';
 
 const envMeta = (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
 export const CONFIGURED_ROOT_DOMAIN = (envMeta.VITE_ROOT_DOMAIN || 'nicolaspitz.dev').toLowerCase();
+
+export interface AuthSnapshot {
+  user: AuthUser;
+  profile: Profile | null;
+}
+
+export interface CachedProfileEntry {
+  profile: Profile;
+  comments: CommentItem[];
+  updatedAt: number;
+}
+
+export function getStoredAuthSnapshot(): AuthSnapshot | null {
+  try {
+    const raw = localStorage.getItem(AUTH_SNAPSHOT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthSnapshot;
+    if (!parsed || !parsed.user || !parsed.user.id) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredAuthSnapshot(snapshot: AuthSnapshot | null): void {
+  try {
+    if (snapshot) {
+      localStorage.setItem(AUTH_SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshot));
+      if (snapshot.profile) {
+        const existing = getCachedProfileEntry(snapshot.profile.username);
+        setCachedProfileEntry(snapshot.profile.username, {
+          profile: snapshot.profile,
+          comments: existing?.comments || [],
+        });
+      }
+    } else {
+      localStorage.removeItem(AUTH_SNAPSHOT_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readProfileCacheMap(): Record<string, CachedProfileEntry> {
+  try {
+    const raw = localStorage.getItem(PROFILE_CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, CachedProfileEntry>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeProfileCacheMap(map: Record<string, CachedProfileEntry>): void {
+  try {
+    const entries = Object.entries(map)
+      .sort((a, b) => (b[1].updatedAt || 0) - (a[1].updatedAt || 0))
+      .slice(0, 15);
+    localStorage.setItem(PROFILE_CACHE_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function getCachedProfileEntry(username: string): CachedProfileEntry | null {
+  const key = username.trim().toLowerCase();
+  const map = readProfileCacheMap();
+  return map[key] || null;
+}
+
+export function setCachedProfileEntry(
+  username: string,
+  data: { profile: Profile; comments: CommentItem[] }
+): void {
+  const key = username.trim().toLowerCase();
+  const map = readProfileCacheMap();
+  map[key] = {
+    profile: data.profile,
+    comments: data.comments.slice(0, 50),
+    updatedAt: Date.now(),
+  };
+  writeProfileCacheMap(map);
+}
+
+export function removeCachedProfileEntry(username: string): void {
+  const key = username.trim().toLowerCase();
+  const map = readProfileCacheMap();
+  if (key in map) {
+    delete map[key];
+    writeProfileCacheMap(map);
+  }
+}
 
 export function getStoredToken(): string | null {
   try {
@@ -90,6 +185,14 @@ function resolveApiBase(): string {
   return '';
 }
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers || {});
   const token = getStoredToken();
@@ -98,16 +201,23 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   headers.set('X-Origin-Fingerprint', getClientFingerprint());
 
+  const method = (init.method || 'GET').toUpperCase();
+  const isSmallMutation =
+    method !== 'GET' &&
+    method !== 'HEAD' &&
+    !(typeof FormData !== 'undefined' && init.body instanceof FormData);
+
   const url = path.startsWith('http') ? path : `${resolveApiBase()}${path}`;
   const res = await fetch(url, {
     ...init,
     headers,
     credentials: 'include',
+    keepalive: init.keepalive ?? isSmallMutation,
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error((data as { error?: string }).error || `Erro HTTP ${res.status}`);
+    throw new ApiError((data as { error?: string }).error || `Erro HTTP ${res.status}`, res.status);
   }
   return data as T;
 }
