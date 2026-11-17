@@ -4,11 +4,18 @@ import {
 	waitOnExecutionContext,
 	SELF,
 } from "cloudflare:test";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ObjectId } from "bson";
+import { Hono } from "hono";
 import type { Db } from "mongodb";
 import worker from "../src/index";
-import { setTestDatabase, getMongoConnectionOptions } from "../src/db";
+import { setTestDatabase, getMongoConnectionOptions, type Env } from "../src/db";
+import {
+	createSessionForUser,
+	resolveAuthenticatedUserCached,
+	getSessionCookieName,
+} from "../src/utils/session";
+import type { Profile, User } from "../src/types";
 import {
 	sanitizeText,
 	validateUsername,
@@ -702,3 +709,223 @@ describe("Authentication, Sessions (RN16), Password Reset (UC04/UC05) & Ownershi
 		expect(spec.paths["/api/auth/login"]).toBeDefined();
 	});
 });
+
+describe("OAuth Session Cache & CORS Regression Fixes", () => {
+	let testDb: Db;
+
+	beforeEach(() => {
+		testDb = createInMemoryMongoDb();
+		setTestDatabase(testDb);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		setTestDatabase(null);
+	});
+
+	it("preserves user profile in session cache when preloaded via createSessionForUser", async () => {
+		const now = new Date();
+		const userId = new ObjectId();
+		const profileId = new ObjectId();
+		const user: User = {
+			_id: userId,
+			email: "oauth-cache@exemplo.com",
+			password_hash: null,
+			auth_provider: "google",
+			auth_provider_id: "google-sub-123",
+			created_at: now,
+			updated_at: now,
+		};
+		const profile: Profile = {
+			_id: profileId,
+			user_id: userId,
+			username: "oauthcache",
+			display_name: "OAuth Cache",
+			bio: "Perfil carregado no login OAuth",
+			theme_config: {
+				background_color: "#121212",
+				card_background: "#1e1e1e",
+				text_color: "#e0e0e0",
+				accent_color: "#00ffcc",
+				font_family: "monospace",
+			},
+			created_at: now,
+			updated_at: now,
+		};
+		await testDb.collection("users").insertOne(user);
+		await testDb.collection("profiles").insertOne(profile);
+
+		let issuedToken = "";
+		let resolvedProfileUsername: string | null = null;
+		const miniApp = new Hono<{ Bindings: Env }>();
+		miniApp.post("/issue", async (c) => {
+			const session = await createSessionForUser(c, testDb, userId, { user, profile });
+			issuedToken = session.token;
+			return c.json({ ok: true });
+		});
+		miniApp.get("/check", async (c) => {
+			const auth = await resolveAuthenticatedUserCached(c);
+			resolvedProfileUsername = auth?.profile?.username ?? null;
+			return c.json({ hasProfile: auth?.profile !== null, username: resolvedProfileUsername });
+		});
+
+		const issueRes = await miniApp.request("https://dev.nicolaspitz.dev/issue", { method: "POST" }, env);
+		expect(issueRes.status).toBe(200);
+		expect(issuedToken).toBeTruthy();
+
+		const checkRes = await miniApp.request(
+			"https://dev.nicolaspitz.dev/check",
+			{ headers: { Authorization: `Bearer ${issuedToken}` } },
+			env
+		);
+		expect(checkRes.status).toBe(200);
+		const checkBody = (await checkRes.json()) as Record<string, any>;
+		expect(checkBody.hasProfile).toBe(true);
+		expect(checkBody.username).toBe("oauthcache");
+	});
+
+	it("caches profile on Google OAuth callback for both new and existing users so /api/auth/me returns profile", async () => {
+		const oauthEnv: Env = {
+			...env,
+			GOOGLE_CLIENT_ID: "test-google-client-id",
+			GOOGLE_CLIENT_SECRET: "test-google-client-secret",
+			APP_URL: "https://dev.nicolaspitz.dev",
+		};
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === "https://oauth2.googleapis.com/token") {
+				return new Response(JSON.stringify({ access_token: "google-access-token" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "https://openidconnect.googleapis.com/v1/userinfo") {
+				return new Response(
+					JSON.stringify({
+						sub: "google-sub-999",
+						email: "googleuser@exemplo.com",
+						email_verified: true,
+						name: "Google User",
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					}
+				);
+			}
+			throw new Error(`Unexpected fetch in test: ${url}`);
+		});
+
+		const cookieName = getSessionCookieName(oauthEnv);
+
+		// 1. Primeiro login Google (cria usuário + perfil)
+		const ctx1 = createExecutionContext();
+		const cb1 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/google/callback?code=code-1&state=state-1", {
+				headers: { Cookie: "guestbook_oauth_state=state-1" },
+			}),
+			oauthEnv,
+			ctx1
+		);
+		await waitOnExecutionContext(ctx1);
+		expect(cb1.status).toBe(302);
+		expect(cb1.headers.get("Location")).toBe("https://dev.nicolaspitz.dev/dashboard?welcome=1");
+		const setCookie1 = cb1.headers.get("Set-Cookie") || "";
+		const token1Match = setCookie1.match(new RegExp(`${cookieName}=([^;]+)`));
+		expect(token1Match).toBeTruthy();
+
+		const ctxMe1 = createExecutionContext();
+		const me1 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/me", {
+				headers: { Cookie: `${cookieName}=${token1Match![1]}` },
+			}),
+			oauthEnv,
+			ctxMe1
+		);
+		await waitOnExecutionContext(ctxMe1);
+		expect(me1.status).toBe(200);
+		const me1Body = (await me1.json()) as Record<string, any>;
+		expect(me1Body.authenticated).toBe(true);
+		expect(me1Body.profile).not.toBeNull();
+		expect(me1Body.profile.username).toBe("googleuser");
+
+		// 2. Segundo login Google (usuário já existente -> deve buscar perfil no banco e popular cache)
+		const ctx2 = createExecutionContext();
+		const cb2 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/google/callback?code=code-2&state=state-2", {
+				headers: { Cookie: "guestbook_oauth_state=state-2" },
+			}),
+			oauthEnv,
+			ctx2
+		);
+		await waitOnExecutionContext(ctx2);
+		expect(cb2.status).toBe(302);
+		expect(cb2.headers.get("Location")).toBe("https://dev.nicolaspitz.dev/dashboard");
+		const setCookie2 = cb2.headers.get("Set-Cookie") || "";
+		const token2Match = setCookie2.match(new RegExp(`${cookieName}=([^;]+)`));
+		expect(token2Match).toBeTruthy();
+
+		const ctxMe2 = createExecutionContext();
+		const me2 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/me", {
+				headers: { Cookie: `${cookieName}=${token2Match![1]}` },
+			}),
+			oauthEnv,
+			ctxMe2
+		);
+		await waitOnExecutionContext(ctxMe2);
+		expect(me2.status).toBe(200);
+		const me2Body = (await me2.json()) as Record<string, any>;
+		expect(me2Body.authenticated).toBe(true);
+		expect(me2Body.profile).not.toBeNull();
+		expect(me2Body.profile.username).toBe("googleuser");
+	});
+
+	it("returns Access-Control-Allow-Credentials for trusted origins and omits it for untrusted origins", async () => {
+		const trustedOrigins = [
+			"https://mineboard-guestbook-dev.pages.dev",
+			"https://dev.nicolaspitz.dev",
+			"http://localhost:5173",
+		];
+
+		for (const origin of trustedOrigins) {
+			const preflightRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/login", {
+				method: "OPTIONS",
+				headers: {
+					Origin: origin,
+					"Access-Control-Request-Method": "POST",
+					"Access-Control-Request-Headers": "Content-Type, X-Origin-Fingerprint",
+				},
+			});
+			expect(preflightRes.status).toBe(204);
+			expect(preflightRes.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+			expect(preflightRes.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+			expect(preflightRes.headers.get("Access-Control-Allow-Headers")).toContain("X-Origin-Fingerprint");
+
+			const getRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/me", {
+				headers: { Origin: origin },
+			});
+			expect(getRes.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+			expect(getRes.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+		}
+
+		const untrustedPreflight = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/me", {
+			method: "OPTIONS",
+			headers: {
+				Origin: "https://evil.example",
+				"Access-Control-Request-Method": "GET",
+			},
+		});
+		expect(untrustedPreflight.status).toBe(204);
+		expect(untrustedPreflight.headers.get("Access-Control-Allow-Origin")).toBe("*");
+		expect(untrustedPreflight.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+
+		const untrustedGet = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/me", {
+			headers: { Origin: "https://evil.example" },
+		});
+		expect(untrustedGet.headers.get("Access-Control-Allow-Origin")).toBe("*");
+		expect(untrustedGet.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+	});
+});
+
