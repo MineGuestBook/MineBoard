@@ -45,7 +45,7 @@
 				"APP_URL": "https://dev.nicolaspitz.dev",
 				"PAGES_ORIGIN": "https://mineboard-guestbook-dev.pages.dev",
 				"SESSION_COOKIE_NAME": "guestbook_session_dev",
-				"EMAIL_FROM": "GuestBook Dev <onboarding@resend.dev>"
+				"EMAIL_FROM": "MineBoard Dev <noreply@nicolaspitz.dev>"
 			},
 			// Bucket provisionado pelo Pulumi (pulumi-prj, stack dev)
 			"r2_buckets": [
@@ -65,7 +65,7 @@
 				"APP_URL": "https://preview-prod.nicolaspitz.dev",
 				"PAGES_ORIGIN": "https://mineboard-guestbook-prod.pages.dev",
 				"SESSION_COOKIE_NAME": "guestbook_session",
-				"EMAIL_FROM": "GuestBook <onboarding@resend.dev>"
+				"EMAIL_FROM": "MineBoard <noreply@nicolaspitz.dev>"
 			},
 			// Bucket provisionado pelo Pulumi (pulumi-prj, stack prod)
 			"r2_buckets": [

@@ -44,6 +44,7 @@ jobs:
       SUBDOMAIN: ${{ (github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev')) == 'prod' && (vars.PROD_SUBDOMAIN || 'preview-prod') || (vars.DEV_SUBDOMAIN || 'dev') }}
       PAGES_PROJECT_NAME: ${{ vars.PAGES_PROJECT_PREFIX || 'mineboard-guestbook' }}-${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
       PAGES_ORIGIN_HOST: ${{ vars.PAGES_ORIGIN_HOST }}
+      EMAIL_FROM: ${{ vars.EMAIL_FROM }}
       MONGODB_URI: ${{ secrets.MONGODB_URI }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -109,10 +110,16 @@ jobs:
           fi
           COMPUTED_PAGES_ORIGIN="${PAGES_ORIGIN_HOST:-https://${PAGES_PROJECT_NAME}.pages.dev}"
 
+          EXTRA_ARGS=()
+          if [ -n "${EMAIL_FROM}" ]; then
+            EXTRA_ARGS+=(--var "EMAIL_FROM:${EMAIL_FROM}")
+          fi
+
           npx wrangler deploy --env "${TARGET_ENV}" \
             --var "ROOT_DOMAIN:${ROOT_DOMAIN}" \
             --var "APP_URL:${COMPUTED_APP_URL}" \
-            --var "PAGES_ORIGIN:${COMPUTED_PAGES_ORIGIN}"
+            --var "PAGES_ORIGIN:${COMPUTED_PAGES_ORIGIN}" \
+            "${EXTRA_ARGS[@]}"
 
       - name: Sincronizar Secrets do Worker (${{ env.TARGET_ENV }})
         if: env.ACTION == 'deploy'
