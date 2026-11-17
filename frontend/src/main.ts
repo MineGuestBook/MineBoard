@@ -25,6 +25,7 @@ interface AppState {
   activeProfile: Profile | null;
   activeComments: CommentItem[];
   isLoadingRoute: boolean;
+  isSessionChecking: boolean;
   flashMessage: { text: string; isError?: boolean } | null;
 }
 
@@ -37,6 +38,7 @@ const state: AppState = {
   activeProfile: null,
   activeComments: [],
   isLoadingRoute: false,
+  isSessionChecking: true,
   flashMessage: null,
 };
 
@@ -59,6 +61,19 @@ function escapeAttr(val: string | null | undefined): string {
     .replace(/>/g, '&gt;');
 }
 
+function decodeBackendEntities(val: string | null | undefined): string {
+  return String(val ?? '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function escapeDisplay(val: string | null | undefined): string {
+  return escapeAttr(decodeBackendEntities(val));
+}
+
 function setFlash(text: string, isError = false): void {
   state.flashMessage = { text, isError };
   render();
@@ -75,8 +90,14 @@ async function refreshSession(): Promise<void> {
     window.location.hostname.endsWith('.pages.dev') ||
     window.location.hostname.endsWith('.workers.dev');
   // Se estiver em domínio sem cookie cross-subdomain e não houver token salvo no localStorage,
-  // evita uma chamada HTTP desnecessária ao /api/auth/me
-  if (isBaseHost && !getStoredToken() && !document.cookie) {
+  // evita uma chamada HTTP desnecessária ao /api/auth/me em rotas públicas
+  // (em /dashboard sempre valida, pois o login via Google OAuth usa cookie HttpOnly)
+  if (
+    isBaseHost &&
+    window.location.pathname !== '/dashboard' &&
+    !getStoredToken() &&
+    !document.cookie
+  ) {
     state.currentUser = null;
     state.myProfile = null;
     return;
@@ -146,10 +167,21 @@ async function handleRoute(): Promise<void> {
   }
 
   if (path === '/dashboard') {
+    if (state.isSessionChecking) {
+      state.view = { type: 'dashboard' };
+      render();
+      return;
+    }
     if (!state.currentUser) {
       state.view = { type: 'auth' };
-    } else {
-      state.view = { type: 'dashboard' };
+      render();
+      return;
+    }
+    state.view = { type: 'dashboard' };
+    if (url.searchParams.get('welcome') === '1') {
+      window.history.replaceState({}, '', '/dashboard');
+      setFlash('Conta conectada com Google com sucesso!');
+      return;
     }
     render();
     return;
@@ -157,6 +189,22 @@ async function handleRoute(): Promise<void> {
 
   if (path === '/login') {
     state.view = { type: 'auth' };
+    const oauthError = url.searchParams.get('error');
+    if (oauthError) {
+      const oauthErrorMessages: Record<string, string> = {
+        oauth_not_configured: 'Login com Google não está configurado no servidor.',
+        invalid_state: 'Sessão de autenticação inválida ou expirada. Tente novamente.',
+        token_exchange_failed: 'Falha ao validar autorização com o Google. Tente novamente.',
+        userinfo_failed: 'Não foi possível obter os dados da conta Google.',
+        email_not_verified: 'Seu e-mail do Google precisa estar verificado para continuar.',
+        oauth_error: 'Erro ao autenticar com o Google. Tente novamente.',
+      };
+      setFlash(
+        oauthErrorMessages[oauthError] || 'Não foi possível concluir o login com o Google.',
+        true
+      );
+      return;
+    }
     render();
     return;
   }
@@ -210,7 +258,7 @@ function buildThemeStyle(theme?: ThemeConfig | null): string {
 
 function renderAvatar(p: Profile): string {
   if (p.avatar_url) {
-    return `<img class="avatar" src="${escapeAttr(p.avatar_url)}" alt="${escapeAttr(p.display_name)}" />`;
+    return `<img class="avatar" src="${escapeAttr(p.avatar_url)}" alt="${escapeDisplay(p.display_name)}" />`;
   }
   const initial = (p.username || '?').slice(0, 2).toUpperCase();
   return `<div class="avatar">[${escapeAttr(initial)}]</div>`;
@@ -250,8 +298,8 @@ function renderHomeView(): string {
               <div class="profile-card">
                 ${renderAvatar(p)}
                 <div style="flex:1">
-                  <div><strong>${escapeAttr(p.display_name)}</strong> <span style="color:var(--muted-color)">@${escapeAttr(p.username)}</span></div>
-                  <div style="font-size:0.82rem;color:var(--muted-color);margin:4px 0 8px">${escapeAttr(p.bio || 'Sem descrição.')}</div>
+                  <div><strong>${escapeDisplay(p.display_name)}</strong> <span style="color:var(--muted-color)">@${escapeAttr(p.username)}</span></div>
+                  <div style="font-size:0.82rem;color:var(--muted-color);margin:4px 0 8px">${escapeDisplay(p.bio || 'Sem descrição.')}</div>
                   <button class="btn" data-nav="/u/${escapeAttr(p.username)}">Abrir mural -&gt;</button>
                 </div>
               </div>
@@ -361,6 +409,9 @@ function renderResetPasswordView(token: string): string {
 }
 
 function renderDashboardView(): string {
+  if (state.isSessionChecking) {
+    return `<section class="panel"><p>Carregando painel...</p></section>`;
+  }
   const p = state.myProfile;
   if (!p) {
     return `<section class="panel"><p>Carregando...</p></section>`;
@@ -377,11 +428,11 @@ function renderDashboardView(): string {
         <form id="form-edit-profile">
           <div class="field">
             <label>Nome</label>
-            <input type="text" name="display_name" value="${escapeAttr(p.display_name)}" required />
+            <input type="text" name="display_name" value="${escapeDisplay(p.display_name)}" required />
           </div>
           <div class="field">
             <label>Biografia</label>
-            <textarea name="bio" rows="3">${escapeAttr(p.bio || '')}</textarea>
+            <textarea name="bio" rows="3">${escapeDisplay(p.bio || '')}</textarea>
           </div>
           <div class="grid-2">
             <div class="field">
@@ -414,6 +465,10 @@ function renderDashboardView(): string {
 
         <hr style="border:0;border-top:1px solid var(--border-color);margin:16px 0" />
         <h3>Avatar</h3>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+          ${renderAvatar(p)}
+          <span style="font-size:0.82rem;color:var(--muted-color)">${p.avatar_url ? 'Avatar atual' : 'Nenhum avatar enviado'}</span>
+        </div>
         <form id="form-avatar">
           <div class="field">
             <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp,image/gif" required />
@@ -478,8 +533,8 @@ function renderProfileView(): string {
         <li class="comment-item">
           <div class="comment-meta">
             <span>
-              <strong>${escapeAttr(c.author_name)}</strong>
-              ${c.author_email ? `<span>&lt;${escapeAttr(c.author_email)}&gt;</span>` : ''}
+              <strong>${escapeDisplay(c.author_name)}</strong>
+              ${c.author_email ? `<span>&lt;${escapeDisplay(c.author_email)}&gt;</span>` : ''}
               - ${new Date(c.created_at).toLocaleString('pt-BR')}
             </span>
             <span style="display:flex;gap:6px;align-items:center">
@@ -493,7 +548,7 @@ function renderProfileView(): string {
               }
             </span>
           </div>
-          <div class="comment-content">${escapeAttr(c.content)}</div>
+          <div class="comment-content">${escapeDisplay(c.content)}</div>
         </li>
       `
         )
@@ -506,8 +561,8 @@ function renderProfileView(): string {
         <div class="profile-card" style="border:none;background:transparent;padding:0">
           ${renderAvatar(p)}
           <div>
-            <h2 style="margin:0;border:0;padding:0">${escapeAttr(p.display_name)} <span style="font-size:0.85rem;color:var(--muted-color);text-transform:none">@${escapeAttr(p.username)}</span></h2>
-            <p style="margin:6px 0 0">${escapeAttr(p.bio || 'Bem-vindo ao meu MineBoard.')}</p>
+            <h2 style="margin:0;border:0;padding:0">${escapeDisplay(p.display_name)} <span style="font-size:0.85rem;color:var(--muted-color);text-transform:none">@${escapeAttr(p.username)}</span></h2>
+            <p style="margin:6px 0 0">${escapeDisplay(p.bio || 'Bem-vindo ao meu MineBoard.')}</p>
           </div>
         </div>
       </section>
@@ -618,6 +673,8 @@ function bindEvents(): void {
       const res = await api.listProfiles(state.searchQuery);
       state.profiles = res.profiles;
       render();
+    } catch (err) {
+      setFlash(err instanceof Error ? err.message : 'Erro ao buscar perfis.', true);
     } finally {
       restore();
     }
@@ -829,6 +886,9 @@ function bindEvents(): void {
 
   document.querySelectorAll<HTMLButtonElement>('.btn-del-comment').forEach((btn) => {
     btn.addEventListener('click', async () => {
+      if (!window.confirm('Tem certeza que deseja excluir este comentário?')) {
+        return;
+      }
       const id = btn.getAttribute('data-id') || '';
       const restore = setButtonBusy(btn, '[Excluindo...]');
       try {
@@ -850,8 +910,13 @@ window.addEventListener('popstate', () => {
 render();
 
 void (async () => {
-  await Promise.all([
-    refreshSession().then(() => render()),
-    handleRoute(),
-  ]);
+  const sessionTask = refreshSession().then(() => {
+    state.isSessionChecking = false;
+    if (window.location.pathname === '/dashboard') {
+      void handleRoute();
+    } else {
+      render();
+    }
+  });
+  await Promise.all([sessionTask, handleRoute()]);
 })();
