@@ -423,6 +423,7 @@ authRouter.get('/google/callback', async (c) => {
     const users = db.collection<User>('users');
 
     let user: User | null = await users.findOne({ auth_provider: 'google', auth_provider_id: info.sub });
+    let profile: Profile | null = null;
     let created = false;
 
     if (!user) {
@@ -449,6 +450,7 @@ authRouter.get('/google/callback', async (c) => {
         avatarUrl: info.picture && info.picture.startsWith('https://') ? info.picture : undefined,
       });
       user = result.user;
+      profile = result.profile;
       created = true;
       await logAuditEvent(db, 'account.created', {
         user_id: user._id,
@@ -456,9 +458,11 @@ authRouter.get('/google/callback', async (c) => {
         username,
         provider: 'google',
       });
+    } else {
+      profile = await db.collection<Profile>('profiles').findOne({ user_id: user._id! });
     }
 
-    await createSessionForUser(c, db, user._id!, { user });
+    await createSessionForUser(c, db, user._id!, { user, profile });
     const { ipHash } = await getClientIdentity(c.req.raw);
     await logAuditEvent(db, 'auth.oauth_login', { user_id: user._id, ip_hash: ipHash, provider: 'google', created });
 

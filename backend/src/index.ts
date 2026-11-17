@@ -20,9 +20,72 @@ import { openApiSpec, renderSwaggerUiHtml } from './openapi';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Permite requisições CORS de qualquer origem para facilitar testes e widget externo.
-// Sem `credentials`, navegadores não enviam cookies de sessão em requisições cross-origin.
-app.use('/api/*', cors());
+const CORS_ALLOW_METHODS = ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'];
+const CORS_ALLOW_HEADERS = ['Content-Type', 'Authorization', 'X-Origin-Fingerprint', 'X-Setup-Token'];
+
+function matchesConfiguredOrigin(origin: string, configuredUrl?: string): boolean {
+  if (!configuredUrl) return false;
+  try {
+    return origin === new URL(configuredUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verifica se a origem da requisição pertence ao próprio GuestBook (domínio raiz,
+ * subdomínios, Cloudflare Pages ou desenvolvimento local) para liberar cookies via CORS.
+ */
+function isTrustedCorsOrigin(origin: string, env: Env): boolean {
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return false;
+    }
+
+    if (matchesConfiguredOrigin(parsed.origin, env.PAGES_ORIGIN) || matchesConfiguredOrigin(parsed.origin, env.APP_URL)) {
+      return true;
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+    const rootDomain = (env.ROOT_DOMAIN || 'nicolaspitz.dev').toLowerCase();
+
+    return (
+      hostname === rootDomain ||
+      hostname.endsWith(`.${rootDomain}`) ||
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      (parsed.protocol === 'https:' && hostname.endsWith('.pages.dev'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+const trustedCors = cors({
+  origin: (origin) => origin,
+  allowHeaders: CORS_ALLOW_HEADERS,
+  allowMethods: CORS_ALLOW_METHODS,
+  credentials: true,
+});
+
+const publicCors = cors({
+  origin: '*',
+  allowHeaders: CORS_ALLOW_HEADERS,
+  allowMethods: CORS_ALLOW_METHODS,
+  credentials: false,
+});
+
+// Origens confiáveis da aplicação recebem CORS com credenciais (cookies de sessão);
+// demais origens permanecem abertas sem credenciais para o widget embutível e testes.
+app.use('/api/*', (c, next) => {
+  const origin = c.req.header('Origin') || '';
+  if (isTrustedCorsOrigin(origin, c.env)) {
+    return trustedCors(c, next);
+  }
+  return publicCors(c, next);
+});
 
 // Uma única conexão MongoDB por requisição, fechada ao final (via waitUntil quando disponível)
 app.use('*', (c, next) => {
