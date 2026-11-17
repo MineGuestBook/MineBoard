@@ -71,9 +71,14 @@ a {
   display: inline-block;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   border-color: var(--accent-color);
   background: #242424;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 .btn-danger {
