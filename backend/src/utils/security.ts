@@ -181,3 +181,153 @@ export async function getClientIdentity(req: Request): Promise<{
 
   return { ipHash, originFingerprint };
 }
+
+// ---------------------------------------------------------------------------
+// Senhas (RF5, RF6) — PBKDF2-SHA256 com salt via Web Crypto API
+// ---------------------------------------------------------------------------
+
+/** Máximo de iterações PBKDF2 suportado pelo runtime workerd. */
+const PBKDF2_ITERATIONS = 100_000;
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 128;
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** Comparação em tempo constante para evitar timing attacks. */
+export function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+async function pbkdf2(password: string, salt: Uint8Array, iterations: number): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+    key,
+    256
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+/**
+ * Valida requisitos mínimos de senha. Não compara com senhas anteriores (RN5).
+ */
+export function validatePassword(password: unknown): string | null {
+  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+    return `A senha deve ter pelo menos ${MIN_PASSWORD_LENGTH} caracteres.`;
+  }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return `A senha deve ter no máximo ${MAX_PASSWORD_LENGTH} caracteres.`;
+  }
+  return null;
+}
+
+/**
+ * Gera hash de senha no formato `pbkdf2$<iterações>$<salt_hex>$<hash_hex>`.
+ */
+export async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await pbkdf2(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${bytesToHex(salt)}$${hash}`;
+}
+
+/**
+ * Verifica uma senha contra o hash armazenado.
+ * Mantém compatibilidade com hashes SHA-256 legados (64 caracteres hex sem salt).
+ */
+export async function verifyPassword(password: string, storedHash: string | null | undefined): Promise<boolean> {
+  if (!storedHash) return false;
+
+  if (storedHash.startsWith('pbkdf2$')) {
+    const [, iterStr, saltHex, hashHex] = storedHash.split('$');
+    const iterations = Number(iterStr);
+    if (!iterations || !saltHex || !hashHex) return false;
+    const candidate = await pbkdf2(password, hexToBytes(saltHex), iterations);
+    return timingSafeEqual(candidate, hashHex);
+  }
+
+  if (/^[0-9a-f]{64}$/.test(storedHash)) {
+    return timingSafeEqual(await hashSha256(password), storedHash);
+  }
+
+  return false;
+}
+
+/** Indica se o hash armazenado é legado e deve ser atualizado após login bem-sucedido. */
+export function needsPasswordRehash(storedHash: string | null | undefined): boolean {
+  return !!storedHash && !storedHash.startsWith('pbkdf2$');
+}
+
+/**
+ * Gera um token aleatório criptograficamente seguro em hexadecimal.
+ */
+export function generateSecureToken(bytes = 32): string {
+  return bytesToHex(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+
+// ---------------------------------------------------------------------------
+// Estilização segura (RF8, RNF5) e URLs de avatar (RF3)
+// ---------------------------------------------------------------------------
+
+export const ALLOWED_FONT_FAMILIES = [
+  'monospace',
+  'serif',
+  'sans-serif',
+  'cursive',
+  'Courier New',
+  'Comic Sans MS',
+  'Times New Roman',
+  'Verdana',
+  'Georgia',
+  'Tahoma',
+] as const;
+
+const COLOR_REGEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+/** Aceita apenas cores hexadecimais para impedir injeção de CSS (RNF5). */
+export function isSafeColor(value: unknown): value is string {
+  return typeof value === 'string' && COLOR_REGEX.test(value.trim());
+}
+
+/** Aceita apenas fontes da lista permitida (RNF5). */
+export function isSafeFontFamily(value: unknown): value is string {
+  return typeof value === 'string' && (ALLOWED_FONT_FAMILIES as readonly string[]).includes(value.trim());
+}
+
+/** Aceita apenas URLs http(s) de avatar, bloqueando esquemas como `javascript:` e `data:`. */
+export function isSafeAvatarUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 512) return false;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+/** Validação simples de formato de email. */
+export function isValidEmail(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 254 && /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/.test(value);
+}

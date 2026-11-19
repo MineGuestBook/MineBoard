@@ -4,11 +4,18 @@ import {
 	waitOnExecutionContext,
 	SELF,
 } from "cloudflare:test";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ObjectId } from "bson";
+import { Hono } from "hono";
 import type { Db } from "mongodb";
 import worker from "../src/index";
-import { setTestDatabase, getMongoConnectionOptions } from "../src/db";
+import { setTestDatabase, getMongoConnectionOptions, type Env } from "../src/db";
+import {
+	createSessionForUser,
+	resolveAuthenticatedUserCached,
+	getSessionCookieName,
+} from "../src/utils/session";
+import type { Profile, User } from "../src/types";
 import {
 	sanitizeText,
 	validateUsername,
@@ -394,3 +401,602 @@ describe("Regression Tests — Bug Prevention & Serverless Robustness", () => {
 		expect(profile.bio).toBe("&lt;script src=&#39;evil.js&#39;&gt;&lt;/script&gt;");
 	});
 });
+
+
+describe("Authentication, Sessions (RN16), Password Reset (UC04/UC05) & Ownership (RN8)", () => {
+	let testDb: Db;
+
+	beforeEach(() => {
+		testDb = createInMemoryMongoDb();
+		setTestDatabase(testDb);
+	});
+
+	afterEach(() => {
+		setTestDatabase(null);
+	});
+
+	it("authenticates automatically on registration (UC01), supports login/logout, and enforces ownership (RN8)", async () => {
+		// 1. Criar conta com senha (UC01) -> emite session_token e cookie com Domain=.nicolaspitz.dev (RN16)
+		const regOwner = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "dono@exemplo.com",
+				username: "donoperfil",
+				display_name: "Dono do Perfil",
+				password: "senhaSegura123",
+			}),
+		});
+		expect(regOwner.status).toBe(201);
+		const setCookieHeader = regOwner.headers.get("Set-Cookie") || "";
+		expect(setCookieHeader).toContain("Domain=.nicolaspitz.dev");
+		expect(setCookieHeader).toContain("HttpOnly");
+		const ownerData = (await regOwner.json()) as Record<string, any>;
+		expect(ownerData.session_token).toBeTruthy();
+		const ownerToken = ownerData.session_token as string;
+
+		// 2. Criar segunda conta (intruso)
+		const regIntruder = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "intruso@exemplo.com",
+				username: "intruso",
+				display_name: "Intruso",
+				password: "outraSenha123",
+			}),
+		});
+		expect(regIntruder.status).toBe(201);
+		const intruderData = (await regIntruder.json()) as Record<string, any>;
+		const intruderToken = intruderData.session_token as string;
+
+		// 3. Visitante publica comentário no perfil do dono (RF10, RF15)
+		const commentRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil/comments", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				author_name: "Visitante",
+				content: "Recado importante!",
+			}),
+		});
+		expect(commentRes.status).toBe(201);
+		const commentBody = (await commentRes.json()) as Record<string, any>;
+		expect(commentBody.owner_notified).toBe(true);
+		const commentId = commentBody.comment.id as string;
+
+		// 4. Sem token: bloquear edição/exclusão de conta protegida por senha (401)
+		const unauthPatch = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ bio: "Hackeado" }),
+		});
+		expect(unauthPatch.status).toBe(401);
+
+		const unauthDelComment = await SELF.fetch(`https://nicolaspitz.dev/api/comments/${commentId}`, {
+			method: "DELETE",
+		});
+		expect(unauthDelComment.status).toBe(401);
+
+		// 5. Com token de outro usuário (intruso): bloquear com 403 Forbidden (RN8)
+		const forbiddenPatch = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil", {
+			method: "PATCH",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${intruderToken}`,
+			},
+			body: JSON.stringify({ bio: "Hackeado pelo intruso" }),
+		});
+		expect(forbiddenPatch.status).toBe(403);
+
+		const forbiddenDelComment = await SELF.fetch(`https://nicolaspitz.dev/api/comments/${commentId}`, {
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${intruderToken}` },
+		});
+		expect(forbiddenDelComment.status).toBe(403);
+
+		// 6. Com token do próprio dono: permitir edição de perfil (UC02) e exclusão de comentário (UC09, RN8)
+		const ownerPatch = await SELF.fetch("https://nicolaspitz.dev/api/profiles/donoperfil", {
+			method: "PATCH",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${ownerToken}`,
+			},
+			body: JSON.stringify({
+				bio: "Bio oficial atualizada",
+				theme_config: {
+					background_color: "#001122",
+					accent_color: "#ff00aa",
+					font_family: "Courier New",
+					malicious_key: "expression(alert(1))",
+				},
+			}),
+		});
+		expect(ownerPatch.status).toBe(200);
+		const patchedProfile = ((await ownerPatch.json()) as Record<string, any>).profile;
+		expect(patchedProfile.bio).toBe("Bio oficial atualizada");
+		expect(patchedProfile.theme_config.background_color).toBe("#001122");
+		expect(patchedProfile.theme_config.malicious_key).toBeUndefined();
+
+		const ownerDelComment = await SELF.fetch(`https://nicolaspitz.dev/api/comments/${commentId}`, {
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(ownerDelComment.status).toBe(200);
+
+		// 7. Consultar /api/auth/me, fazer logout e fazer login novamente
+		const meRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/me", {
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(meRes.status).toBe(200);
+		const meBody = (await meRes.json()) as Record<string, any>;
+		expect(meBody.authenticated).toBe(true);
+		expect(meBody.profile.username).toBe("donoperfil");
+
+		const logoutRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/logout", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(logoutRes.status).toBe(200);
+
+		const meAfterLogout = await SELF.fetch("https://nicolaspitz.dev/api/auth/me", {
+			headers: { Authorization: `Bearer ${ownerToken}` },
+		});
+		expect(meAfterLogout.status).toBe(401);
+
+		const loginRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/login", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "dono@exemplo.com",
+				password: "senhaSegura123",
+			}),
+		});
+		expect(loginRes.status).toBe(200);
+		const loginBody = (await loginRes.json()) as Record<string, any>;
+		expect(loginBody.session_token).toBeTruthy();
+	});
+
+	it("supports password change (UC04, RN5) and single-use password reset token flow (UC05, RN4)", async () => {
+		const regRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "recuperar@exemplo.com",
+				username: "user-senha",
+				display_name: "User Senha",
+				password: "senhaInicial123",
+			}),
+		});
+		expect(regRes.status).toBe(201);
+		const { session_token: token } = (await regRes.json()) as Record<string, any>;
+
+		// 1. Alterar senha permitindo senha igual à anterior (RN5)
+		const samePassRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/change-password", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+			body: JSON.stringify({
+				current_password: "senhaInicial123",
+				new_password: "senhaInicial123",
+			}),
+		});
+		expect(samePassRes.status).toBe(200);
+
+		// 2. Rejeitar senha atual incorreta (UC04)
+		const wrongPassRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/change-password", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+			body: JSON.stringify({
+				current_password: "senhaErrada999",
+				new_password: "novaSenha456",
+			}),
+		});
+		expect(wrongPassRes.status).toBe(403);
+
+		// 3. Solicitar recuperação de senha (UC05)
+		const forgotRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/forgot-password", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ email: "recuperar@exemplo.com" }),
+		});
+		expect(forgotRes.status).toBe(200);
+
+		// 4. Testar redefinição com token conhecido inserido na coleção password_reset_tokens (RN4)
+		const userDoc = await testDb.collection("users").findOne({ email: "recuperar@exemplo.com" });
+		expect(userDoc).toBeTruthy();
+
+		const rawResetToken = "token-unico-recuperacao-123456";
+		const encoder = new TextEncoder();
+		const hashBuf = await crypto.subtle.digest("SHA-256", encoder.encode(rawResetToken));
+		const tokenHash = Array.from(new Uint8Array(hashBuf))
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+
+		await testDb.collection("password_reset_tokens").insertOne({
+			user_id: userDoc!._id,
+			token_hash: tokenHash,
+			expires_at: new Date(Date.now() + 3600_000),
+			used_at: null,
+			created_at: new Date(),
+		});
+
+		const resetRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/reset-password", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				token: rawResetToken,
+				new_password: "senhaRedefinida789",
+			}),
+		});
+		expect(resetRes.status).toBe(200);
+
+		// 5. Garantir que o mesmo token não pode ser reutilizado (RN4)
+		const reuseRes = await SELF.fetch("https://nicolaspitz.dev/api/auth/reset-password", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				token: rawResetToken,
+				new_password: "outraTentativa789",
+			}),
+		});
+		expect(reuseRes.status).toBe(400);
+
+		// 6. Login com a nova senha funciona
+		const loginNew = await SELF.fetch("https://nicolaspitz.dev/api/auth/login", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "recuperar@exemplo.com",
+				password: "senhaRedefinida789",
+			}),
+		});
+		expect(loginNew.status).toBe(200);
+	});
+
+	it("serves embeddable widget script/iframe (RF14, UC10), R2 avatar upload (RF3) and OpenAPI spec", async () => {
+		const regRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "widget@exemplo.com",
+				username: "retro-widget",
+				display_name: "Retro Widget",
+				password: "senhaSegura123",
+			}),
+		});
+		expect(regRes.status).toBe(201);
+		const { session_token: token } = (await regRes.json()) as Record<string, any>;
+
+		// 1. Widget script (embed.js) e iframe HTML (frame)
+		const scriptRes = await SELF.fetch("https://nicolaspitz.dev/api/widget/retro-widget/embed.js");
+		expect(scriptRes.status).toBe(200);
+		expect(scriptRes.headers.get("Content-Type")).toContain("application/javascript");
+		expect(await scriptRes.text()).toContain("retro-widget");
+
+		const frameRes = await SELF.fetch("https://nicolaspitz.dev/api/widget/retro-widget/frame");
+		expect(frameRes.status).toBe(200);
+		expect(await frameRes.text()).toContain("GuestBook de Retro Widget");
+
+		// 2. Upload de avatar no R2 (RF3)
+		const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+		const avatarRes = await SELF.fetch("https://nicolaspitz.dev/api/profiles/retro-widget/avatar", {
+			method: "POST",
+			headers: {
+				"Content-Type": "image/png",
+				Authorization: `Bearer ${token}`,
+			},
+			body: pngBytes,
+		});
+		expect(avatarRes.status).toBe(200);
+		const avatarData = (await avatarRes.json()) as Record<string, any>;
+		expect(avatarData.avatar_url).toContain("/api/avatars/");
+
+		// Buscar o avatar recém-enviado
+		const getAvatarRes = await SELF.fetch(avatarData.avatar_url);
+		expect(getAvatarRes.status).toBe(200);
+		expect(getAvatarRes.headers.get("Content-Type")).toBe("image/png");
+
+		// 3. Especificação OpenAPI 3.0
+		const openApiRes = await SELF.fetch("https://nicolaspitz.dev/api/openapi.json");
+		expect(openApiRes.status).toBe(200);
+		const spec = (await openApiRes.json()) as Record<string, any>;
+		expect(spec.openapi).toBe("3.0.3");
+		expect(spec.paths["/api/auth/login"]).toBeDefined();
+	});
+});
+
+describe("OAuth Session Cache & CORS Regression Fixes", () => {
+	let testDb: Db;
+
+	beforeEach(() => {
+		testDb = createInMemoryMongoDb();
+		setTestDatabase(testDb);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		setTestDatabase(null);
+	});
+
+	it("preserves user profile in session cache when preloaded via createSessionForUser", async () => {
+		const now = new Date();
+		const userId = new ObjectId();
+		const profileId = new ObjectId();
+		const user: User = {
+			_id: userId,
+			email: "oauth-cache@exemplo.com",
+			password_hash: null,
+			auth_provider: "google",
+			auth_provider_id: "google-sub-123",
+			created_at: now,
+			updated_at: now,
+		};
+		const profile: Profile = {
+			_id: profileId,
+			user_id: userId,
+			username: "oauthcache",
+			display_name: "OAuth Cache",
+			bio: "Perfil carregado no login OAuth",
+			theme_config: {
+				background_color: "#121212",
+				card_background: "#1e1e1e",
+				text_color: "#e0e0e0",
+				accent_color: "#00ffcc",
+				font_family: "monospace",
+			},
+			created_at: now,
+			updated_at: now,
+		};
+		await testDb.collection("users").insertOne(user);
+		await testDb.collection("profiles").insertOne(profile);
+
+		let issuedToken = "";
+		let resolvedProfileUsername: string | null = null;
+		const miniApp = new Hono<{ Bindings: Env }>();
+		miniApp.post("/issue", async (c) => {
+			const session = await createSessionForUser(c, testDb, userId, { user, profile });
+			issuedToken = session.token;
+			return c.json({ ok: true });
+		});
+		miniApp.get("/check", async (c) => {
+			const auth = await resolveAuthenticatedUserCached(c);
+			resolvedProfileUsername = auth?.profile?.username ?? null;
+			return c.json({ hasProfile: auth?.profile !== null, username: resolvedProfileUsername });
+		});
+
+		const issueRes = await miniApp.request("https://dev.nicolaspitz.dev/issue", { method: "POST" }, env);
+		expect(issueRes.status).toBe(200);
+		expect(issuedToken).toBeTruthy();
+
+		const checkRes = await miniApp.request(
+			"https://dev.nicolaspitz.dev/check",
+			{ headers: { Authorization: `Bearer ${issuedToken}` } },
+			env
+		);
+		expect(checkRes.status).toBe(200);
+		const checkBody = (await checkRes.json()) as Record<string, any>;
+		expect(checkBody.hasProfile).toBe(true);
+		expect(checkBody.username).toBe("oauthcache");
+	});
+
+	it("caches profile on Google OAuth callback for both new and existing users so /api/auth/me returns profile", async () => {
+		const oauthEnv: Env = {
+			...env,
+			GOOGLE_CLIENT_ID: "test-google-client-id",
+			GOOGLE_CLIENT_SECRET: "test-google-client-secret",
+			APP_URL: "https://dev.nicolaspitz.dev",
+		};
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === "https://oauth2.googleapis.com/token") {
+				return new Response(JSON.stringify({ access_token: "google-access-token" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "https://openidconnect.googleapis.com/v1/userinfo") {
+				return new Response(
+					JSON.stringify({
+						sub: "google-sub-999",
+						email: "googleuser@exemplo.com",
+						email_verified: true,
+						name: "Google User",
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					}
+				);
+			}
+			throw new Error(`Unexpected fetch in test: ${url}`);
+		});
+
+		const cookieName = getSessionCookieName(oauthEnv);
+
+		// 1. Primeiro login Google (cria usuário + perfil)
+		const ctx1 = createExecutionContext();
+		const cb1 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/google/callback?code=code-1&state=state-1", {
+				headers: { Cookie: "guestbook_oauth_state=state-1" },
+			}),
+			oauthEnv,
+			ctx1
+		);
+		await waitOnExecutionContext(ctx1);
+		expect(cb1.status).toBe(302);
+		expect(cb1.headers.get("Location")).toBe("https://dev.nicolaspitz.dev/dashboard?welcome=1");
+		const setCookie1 = cb1.headers.get("Set-Cookie") || "";
+		const token1Match = setCookie1.match(new RegExp(`${cookieName}=([^;]+)`));
+		expect(token1Match).toBeTruthy();
+
+		const ctxMe1 = createExecutionContext();
+		const me1 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/me", {
+				headers: { Cookie: `${cookieName}=${token1Match![1]}` },
+			}),
+			oauthEnv,
+			ctxMe1
+		);
+		await waitOnExecutionContext(ctxMe1);
+		expect(me1.status).toBe(200);
+		const me1Body = (await me1.json()) as Record<string, any>;
+		expect(me1Body.authenticated).toBe(true);
+		expect(me1Body.profile).not.toBeNull();
+		expect(me1Body.profile.username).toBe("googleuser");
+
+		// 2. Segundo login Google (usuário já existente -> deve buscar perfil no banco e popular cache)
+		const ctx2 = createExecutionContext();
+		const cb2 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/google/callback?code=code-2&state=state-2", {
+				headers: { Cookie: "guestbook_oauth_state=state-2" },
+			}),
+			oauthEnv,
+			ctx2
+		);
+		await waitOnExecutionContext(ctx2);
+		expect(cb2.status).toBe(302);
+		expect(cb2.headers.get("Location")).toBe("https://dev.nicolaspitz.dev/dashboard");
+		const setCookie2 = cb2.headers.get("Set-Cookie") || "";
+		const token2Match = setCookie2.match(new RegExp(`${cookieName}=([^;]+)`));
+		expect(token2Match).toBeTruthy();
+
+		const ctxMe2 = createExecutionContext();
+		const me2 = await worker.fetch(
+			new IncomingRequest("https://dev.nicolaspitz.dev/api/auth/me", {
+				headers: { Cookie: `${cookieName}=${token2Match![1]}` },
+			}),
+			oauthEnv,
+			ctxMe2
+		);
+		await waitOnExecutionContext(ctxMe2);
+		expect(me2.status).toBe(200);
+		const me2Body = (await me2.json()) as Record<string, any>;
+		expect(me2Body.authenticated).toBe(true);
+		expect(me2Body.profile).not.toBeNull();
+		expect(me2Body.profile.username).toBe("googleuser");
+	});
+
+	it("returns Access-Control-Allow-Credentials for trusted origins and omits it for untrusted origins", async () => {
+		const trustedOrigins = [
+			"https://mineboard-guestbook-dev.pages.dev",
+			"https://dev.nicolaspitz.dev",
+			"http://localhost:5173",
+		];
+
+		for (const origin of trustedOrigins) {
+			const preflightRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/login", {
+				method: "OPTIONS",
+				headers: {
+					Origin: origin,
+					"Access-Control-Request-Method": "POST",
+					"Access-Control-Request-Headers": "Content-Type, X-Origin-Fingerprint",
+				},
+			});
+			expect(preflightRes.status).toBe(204);
+			expect(preflightRes.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+			expect(preflightRes.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+			expect(preflightRes.headers.get("Access-Control-Allow-Headers")).toContain("X-Origin-Fingerprint");
+
+			const getRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/me", {
+				headers: { Origin: origin },
+			});
+			expect(getRes.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+			expect(getRes.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+		}
+
+		const untrustedPreflight = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/me", {
+			method: "OPTIONS",
+			headers: {
+				Origin: "https://evil.example",
+				"Access-Control-Request-Method": "GET",
+			},
+		});
+		expect(untrustedPreflight.status).toBe(204);
+		expect(untrustedPreflight.headers.get("Access-Control-Allow-Origin")).toBe("*");
+		expect(untrustedPreflight.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+
+		const untrustedGet = await SELF.fetch("https://dev.nicolaspitz.dev/api/auth/me", {
+			headers: { Origin: "https://evil.example" },
+		});
+		expect(untrustedGet.headers.get("Access-Control-Allow-Origin")).toBe("*");
+		expect(untrustedGet.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+	});
+
+	it("handles simultaneous comments and atomic likes under concurrency without data loss (RNF2, RNF3, RN9)", async () => {
+		const createRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "stress@exemplo.com",
+				username: "stress-user",
+				display_name: "Stress Profile",
+				password: "Password123!",
+			}),
+		});
+		expect(createRes.status).toBe(201);
+
+		const concurrentComments = 20;
+		const commentResponses = await Promise.all(
+			Array.from({ length: concurrentComments }, (_, i) =>
+				SELF.fetch("https://dev.nicolaspitz.dev/api/profiles/stress-user/comments", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Forwarded-For": `198.51.100.${i + 1}`,
+						"X-Origin-Fingerprint": `stress-author-${i}`,
+					},
+					body: JSON.stringify({
+						author_name: i % 2 === 0 ? `Author ${i}` : "",
+						content: `Concurrent message #${i}`,
+					}),
+				})
+			)
+		);
+
+		for (const res of commentResponses) {
+			expect(res.status).toBe(201);
+		}
+		const firstComment = ((await commentResponses[0].json()) as Record<string, any>).comment;
+
+		const concurrentLikes = 25;
+		const likeResponses = await Promise.all(
+			Array.from({ length: concurrentLikes }, (_, i) =>
+				SELF.fetch(`https://dev.nicolaspitz.dev/api/comments/${firstComment.id}/like`, {
+					method: "POST",
+					headers: { "X-Origin-Fingerprint": `stress-liker-${i}` },
+				})
+			)
+		);
+		for (const res of likeResponses) {
+			expect(res.status).toBe(200);
+		}
+
+		// Duplicate concurrent likes from the exact same origins must all be rejected with 409 (RN9)
+		const duplicateResponses = await Promise.all(
+			Array.from({ length: concurrentLikes }, (_, i) =>
+				SELF.fetch(`https://dev.nicolaspitz.dev/api/comments/${firstComment.id}/like`, {
+					method: "POST",
+					headers: { "X-Origin-Fingerprint": `stress-liker-${i}` },
+				})
+			)
+		);
+		for (const res of duplicateResponses) {
+			expect(res.status).toBe(409);
+		}
+
+		// Verify zero data loss on paginated profile fetch (RNF2, RNF3)
+		const profileRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/profiles/stress-user?limit=50");
+		expect(profileRes.status).toBe(200);
+		const profileData = (await profileRes.json()) as Record<string, any>;
+		expect(profileData.comments).toHaveLength(concurrentComments);
+		const targetComment = profileData.comments.find((c: Record<string, any>) => c.id === firstComment.id);
+		expect(targetComment.likes_count).toBe(concurrentLikes);
+	});
+});
+

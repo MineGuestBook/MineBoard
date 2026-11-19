@@ -1,16 +1,56 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { ObjectId } from 'bson';
+import type { Db } from 'mongodb';
 import { Env, getDatabase } from '../db';
-import { Comment, Profile } from '../types';
-import { serializeComment } from './profiles';
+import { Comment, Profile, User } from '../types';
+import { invalidatePublicCache, serializeComment } from './profiles';
 import {
   getClientIdentity,
+  isValidEmail,
   normalizeUsername,
   sanitizeText,
 } from '../utils/security';
+import { authorizeProfileOwner } from '../utils/session';
+import { logAuditEvent } from '../utils/audit';
+import { EmailResult, sendNewCommentNotification } from '../utils/email';
 
 export const profileCommentsRouter = new Hono<{ Bindings: Env }>();
 export const commentsRouter = new Hono<{ Bindings: Env }>();
+
+export const MAX_AUTHOR_NAME_LENGTH = 60;
+
+/**
+ * Notifica o dono do perfil sobre um novo comentário (RF15, UC11).
+ * RN13: só envia se a conta existir e tiver email válido cadastrado.
+ * A busca do dono é feita durante a requisição; o envio HTTP ao Resend é o único passo assíncrono.
+ */
+export async function notifyProfileOwner(
+  db: Db,
+  env: Env,
+  profile: Profile,
+  comment: Comment
+): Promise<{ eligible: boolean; send?: () => Promise<EmailResult> }> {
+  const owner = await db.collection<User>('users').findOne({ _id: profile.user_id });
+  if (!owner || !isValidEmail(owner.email)) {
+    return { eligible: false };
+  }
+
+  return {
+    eligible: true,
+    send: () => sendNewCommentNotification(env, owner.email, profile.username, comment.author_name, comment.content),
+  };
+}
+
+/** Executa uma tarefa após a resposta via `waitUntil` quando disponível. */
+function runInBackground(c: Context<{ Bindings: Env }>, task: Promise<unknown>): void {
+  const guarded = task.catch(() => undefined);
+  try {
+    c.executionCtx.waitUntil(guarded);
+  } catch {
+    // Sem ExecutionContext (ex.: chamadas diretas em testes): a promise segue sem bloquear a resposta
+  }
+}
 
 /**
  * GET /api/profiles/:username/comments
@@ -73,13 +113,16 @@ profileCommentsRouter.post('/:username/comments', async (c) => {
     }
 
     // Nome e email livres e opcionais (RN7) — se em branco, assume "Anônimo" (RF11)
-    const rawAuthorName = typeof body.author_name === 'string' ? sanitizeText(body.author_name) : '';
+    const rawAuthorName =
+      typeof body.author_name === 'string' ? sanitizeText(body.author_name).slice(0, MAX_AUTHOR_NAME_LENGTH) : '';
     const authorName = rawAuthorName || 'Anônimo';
 
-    const rawAuthorEmail =
-      typeof body.author_email === 'string' && body.author_email.trim()
-        ? sanitizeText(body.author_email.trim().toLowerCase())
-        : undefined;
+    const trimmedEmail =
+      typeof body.author_email === 'string' ? body.author_email.trim().toLowerCase() : '';
+    if (trimmedEmail && !isValidEmail(trimmedEmail)) {
+      return c.json({ error: 'author_email inválido. Informe um email válido ou deixe em branco.' }, 400);
+    }
+    const rawAuthorEmail = trimmedEmail ? sanitizeText(trimmedEmail) : undefined;
 
     const { db } = await getDatabase(c.env);
     const profile = await db.collection<Profile>('profiles').findOne({ username });
@@ -98,6 +141,7 @@ profileCommentsRouter.post('/:username/comments', async (c) => {
     });
 
     if (recentCommentsByIp >= maxCommentsPerMinute) {
+      await logAuditEvent(db, 'comment.rate_limited', { profile_id: profile._id, ip_hash: ipHash });
       return c.json(
         {
           error: 'Limite de comentários por minuto atingido. Aguarde alguns instantes antes de enviar novamente (RNF1).',
@@ -119,11 +163,25 @@ profileCommentsRouter.post('/:username/comments', async (c) => {
     };
 
     await db.collection<Comment>('comments').insertOne(newComment);
+    await invalidatePublicCache(profile.username);
+    await logAuditEvent(db, 'comment.created', {
+      profile_id: profile._id,
+      comment_id: newComment._id?.toString(),
+      ip_hash: ipHash,
+      anonymous: authorName === 'Anônimo',
+    });
+
+    // Notificação por email ao dono do perfil (RF15, RN13, UC11)
+    const notification = await notifyProfileOwner(db, c.env, profile, newComment);
+    if (notification.eligible && notification.send) {
+      runInBackground(c, notification.send());
+    }
 
     return c.json(
       {
         message: 'Comentário publicado com sucesso.',
         comment: serializeComment(newComment, originFingerprint),
+        owner_notified: notification.eligible,
       },
       201
     );
@@ -173,6 +231,8 @@ commentsRouter.post('/:id/like', async (c) => {
     }
 
     const updated = await db.collection<Comment>('comments').findOne({ _id: commentId });
+    const profile = updated ? await db.collection<Profile>('profiles').findOne({ _id: updated.profile_id }) : null;
+    await invalidatePublicCache(profile?.username);
 
     return c.json({
       message: 'Curtida registrada com sucesso.',
@@ -217,6 +277,8 @@ commentsRouter.delete('/:id/like', async (c) => {
     }
 
     const updated = await db.collection<Comment>('comments').findOne({ _id: commentId });
+    const profile = updated ? await db.collection<Profile>('profiles').findOne({ _id: updated.profile_id }) : null;
+    await invalidatePublicCache(profile?.username);
 
     return c.json({
       message: 'Curtida removida com sucesso.',
@@ -232,6 +294,7 @@ commentsRouter.delete('/:id/like', async (c) => {
 /**
  * DELETE /api/comments/:id
  * Exclui um comentário e todos os seus likes associados (RF12, RN8, RN10).
+ * Somente o dono do perfil onde o comentário foi publicado pode excluí-lo (RN8).
  */
 commentsRouter.delete('/:id', async (c) => {
   try {
@@ -243,10 +306,32 @@ commentsRouter.delete('/:id', async (c) => {
     const commentId = new ObjectId(rawId);
     const { db } = await getDatabase(c.env);
 
+    const comment = await db.collection<Comment>('comments').findOne({ _id: commentId });
+    if (!comment) {
+      return c.json({ error: 'Comentário não encontrado.' }, 404);
+    }
+
+    const profile = await db.collection<Profile>('profiles').findOne({ _id: comment.profile_id });
+    if (profile) {
+      const authz = await authorizeProfileOwner(c, db, profile);
+      if (!authz.ok) {
+        await logAuditEvent(db, 'auth.unauthorized', { profile_id: profile._id, operation: 'comment.delete' });
+        return c.json({ error: authz.error }, authz.status);
+      }
+    }
+
+    // Likes ficam embutidos no documento (liked_by/likes_count) e são removidos junto (RN10)
     const deleteResult = await db.collection<Comment>('comments').deleteOne({ _id: commentId });
     if (deleteResult.deletedCount === 0) {
       return c.json({ error: 'Comentário não encontrado.' }, 404);
     }
+    await invalidatePublicCache(profile?.username);
+
+    await logAuditEvent(db, 'comment.deleted', {
+      user_id: profile?.user_id ?? null,
+      profile_id: comment.profile_id,
+      comment_id: rawId,
+    });
 
     return c.json({
       message: 'Comentário e curtidas associadas removidos com sucesso (RF12, RN10).',
