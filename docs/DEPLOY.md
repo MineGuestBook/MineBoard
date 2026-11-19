@@ -47,7 +47,7 @@ Este documento descreve como qualquer pessoa (como o professor ou avaliador) pod
 |---|---|---|---|
 | `ROOT_DOMAIN` | `meudominio.dev` | `nicolaspitz.dev` | Domínio raiz gerenciado na Cloudflare |
 | `DEV_SUBDOMAIN` | `dev` | `dev` | Subdomínio da stack `dev` (`dev.meudominio.dev`) |
-| `PROD_SUBDOMAIN` | `@` ou `preview-prod` | `preview-prod` | Subdomínio da stack `prod` (`@` = domínio raiz) |
+| `PROD_SUBDOMAIN` | `@` ou `prod` | `prod` | Subdomínio da stack `prod` (`@` = domínio raiz) |
 | `PAGES_PROJECT_PREFIX` | `mineboard-prof` | `mineboard-guestbook` | Prefixo único do projeto Cloudflare Pages (deve ser globalmente único na Cloudflare) |
 | `EMAIL_FROM` | `MineBoard <noreply@meudominio.dev>` | `MineBoard <noreply@nicolaspitz.dev>` | Remetente usado pelo Resend (o domínio precisa estar verificado no Resend) |
 

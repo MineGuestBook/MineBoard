@@ -62,7 +62,7 @@
 				"DATABASE_NAME": "guestbook",
 				"ROOT_DOMAIN": "nicolaspitz.dev",
 				"RATE_LIMIT_MAX_PER_MINUTE": "10",
-				"APP_URL": "https://preview-prod.nicolaspitz.dev",
+				"APP_URL": "https://prod.nicolaspitz.dev",
 				"PAGES_ORIGIN": "https://mineboard-guestbook-prod.pages.dev",
 				"SESSION_COOKIE_NAME": "guestbook_session",
 				"EMAIL_FROM": "MineBoard <noreply@nicolaspitz.dev>"

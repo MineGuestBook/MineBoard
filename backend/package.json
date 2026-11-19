@@ -7,6 +7,7 @@
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "test": "vitest",
+    "test:load": "node scripts/load-test.mjs",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"
   },

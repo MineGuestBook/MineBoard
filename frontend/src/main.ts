@@ -216,6 +216,7 @@ async function handleRoute(): Promise<void> {
     hostname === CONFIGURED_ROOT_DOMAIN ||
     hostname === `www.${CONFIGURED_ROOT_DOMAIN}` ||
     hostname === `dev.${CONFIGURED_ROOT_DOMAIN}` ||
+    hostname === `prod.${CONFIGURED_ROOT_DOMAIN}` ||
     hostname === `preview-prod.${CONFIGURED_ROOT_DOMAIN}` ||
     hostname.endsWith('.pages.dev') ||
     hostname.endsWith('.workers.dev');

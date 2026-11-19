@@ -41,7 +41,7 @@ jobs:
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID || vars.CLOUDFLARE_ZONE_ID || 'bb592384462f132dc22c112697f29ab6' }}
       PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
       ROOT_DOMAIN: ${{ vars.ROOT_DOMAIN || 'nicolaspitz.dev' }}
-      SUBDOMAIN: ${{ (github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev')) == 'prod' && (vars.PROD_SUBDOMAIN || 'preview-prod') || (vars.DEV_SUBDOMAIN || 'dev') }}
+      SUBDOMAIN: ${{ (github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev')) == 'prod' && (vars.PROD_SUBDOMAIN || 'prod') || (vars.DEV_SUBDOMAIN || 'dev') }}
       PAGES_PROJECT_NAME: ${{ vars.PAGES_PROJECT_PREFIX || 'mineboard-guestbook' }}-${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || 'dev') }}
       PAGES_ORIGIN_HOST: ${{ vars.PAGES_ORIGIN_HOST }}
       EMAIL_FROM: ${{ vars.EMAIL_FROM }}

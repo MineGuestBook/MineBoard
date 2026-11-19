@@ -360,6 +360,29 @@ db.password_reset_tokens.createIndex({ token_hash: 1 }, { unique: true });
 db.password_reset_tokens.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 });
 ```
 
+### 6.6 Coleção: `audit_logs`
+Registra operações críticas do sistema (criação/exclusão de conta, falhas de login, alteração/redefinição de senha, exclusão de comentários, bloqueios por rate limit e disparos de email) com retenção automática de 90 dias via índice TTL.
+
+```json
+{
+  "_id": ObjectId("..."),
+  "action": "account.created",
+  "user_id": ObjectId("670cb1e2..."),
+  "profile_id": ObjectId("670cb2a1..."),
+  "ip_hash": "e3b0c442...",
+  "details": {
+    "username": "joaosilva",
+    "has_password": true
+  },
+  "created_at": ISODate("2026-10-15T00:00:00Z")
+}
+```
+**Índices essenciais:**
+```javascript
+db.audit_logs.createIndex({ action: 1, created_at: -1 });
+db.audit_logs.createIndex({ created_at: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
+```
+
 ---
 
 ## 7. Script DDL SQL de Referência (Esquema Relacional Inicial)

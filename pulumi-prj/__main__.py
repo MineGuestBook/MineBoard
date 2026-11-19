@@ -8,7 +8,7 @@ account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID") or config.require("accountId")
 zone_id = os.getenv("CLOUDFLARE_ZONE_ID") or config.require("zoneId")
 domain = os.getenv("ROOT_DOMAIN") or config.get("domain") or "nicolaspitz.dev"
 current_stack = pulumi.get_stack()
-default_subdomain = "preview-prod" if current_stack == "prod" else "dev"
+default_subdomain = "prod" if current_stack == "prod" else "dev"
 subdomain = os.getenv("SUBDOMAIN") or config.get("subdomain") or default_subdomain
 worker_script = os.getenv("WORKER_SCRIPT") or config.get("workerScript") or f"guestbook-backend-{current_stack}"
 r2_bucket_name = os.getenv("R2_BUCKET_NAME") or config.get("r2BucketName") or f"guestbook-avatars-{current_stack}"
