@@ -23,6 +23,9 @@ test-backend:
 demo-backend:
 	bash backend/scripts/demo-requests.sh
 
+load-test:
+	cd backend && npm run test:load
+
 dev-frontend:
 	cd frontend && npm run dev
 

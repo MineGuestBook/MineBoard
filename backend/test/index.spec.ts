@@ -927,5 +927,76 @@ describe("OAuth Session Cache & CORS Regression Fixes", () => {
 		expect(untrustedGet.headers.get("Access-Control-Allow-Origin")).toBe("*");
 		expect(untrustedGet.headers.get("Access-Control-Allow-Credentials")).toBeNull();
 	});
+
+	it("handles simultaneous comments and atomic likes under concurrency without data loss (RNF2, RNF3, RN9)", async () => {
+		const createRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/profiles", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				email: "stress@exemplo.com",
+				username: "stress-user",
+				display_name: "Stress Profile",
+				password: "Password123!",
+			}),
+		});
+		expect(createRes.status).toBe(201);
+
+		const concurrentComments = 20;
+		const commentResponses = await Promise.all(
+			Array.from({ length: concurrentComments }, (_, i) =>
+				SELF.fetch("https://dev.nicolaspitz.dev/api/profiles/stress-user/comments", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Forwarded-For": `198.51.100.${i + 1}`,
+						"X-Origin-Fingerprint": `stress-author-${i}`,
+					},
+					body: JSON.stringify({
+						author_name: i % 2 === 0 ? `Author ${i}` : "",
+						content: `Concurrent message #${i}`,
+					}),
+				})
+			)
+		);
+
+		for (const res of commentResponses) {
+			expect(res.status).toBe(201);
+		}
+		const firstComment = ((await commentResponses[0].json()) as Record<string, any>).comment;
+
+		const concurrentLikes = 25;
+		const likeResponses = await Promise.all(
+			Array.from({ length: concurrentLikes }, (_, i) =>
+				SELF.fetch(`https://dev.nicolaspitz.dev/api/comments/${firstComment.id}/like`, {
+					method: "POST",
+					headers: { "X-Origin-Fingerprint": `stress-liker-${i}` },
+				})
+			)
+		);
+		for (const res of likeResponses) {
+			expect(res.status).toBe(200);
+		}
+
+		// Duplicate concurrent likes from the exact same origins must all be rejected with 409 (RN9)
+		const duplicateResponses = await Promise.all(
+			Array.from({ length: concurrentLikes }, (_, i) =>
+				SELF.fetch(`https://dev.nicolaspitz.dev/api/comments/${firstComment.id}/like`, {
+					method: "POST",
+					headers: { "X-Origin-Fingerprint": `stress-liker-${i}` },
+				})
+			)
+		);
+		for (const res of duplicateResponses) {
+			expect(res.status).toBe(409);
+		}
+
+		// Verify zero data loss on paginated profile fetch (RNF2, RNF3)
+		const profileRes = await SELF.fetch("https://dev.nicolaspitz.dev/api/profiles/stress-user?limit=50");
+		expect(profileRes.status).toBe(200);
+		const profileData = (await profileRes.json()) as Record<string, any>;
+		expect(profileData.comments).toHaveLength(concurrentComments);
+		const targetComment = profileData.comments.find((c: Record<string, any>) => c.id === firstComment.id);
+		expect(targetComment.likes_count).toBe(concurrentLikes);
+	});
 });
 

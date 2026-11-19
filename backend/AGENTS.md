@@ -26,6 +26,7 @@
 ```bash
 npm run dev                  # Iniciar servidor local (http://localhost:8787)
 npm test -- --run            # Executar testes automatizados com Vitest
+npm run test:load            # Executar teste de carga e concorrência (RNF2, RNF3)
 npm run typecheck            # Checagem estática de tipos TypeScript
 npx wrangler deploy --dry-run # Smoke test de empacotamento do Worker
 ```

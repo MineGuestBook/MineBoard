@@ -33,4 +33,9 @@ cd frontend && npm install && npm run dev
 # 3. Executar testes automatizados e checagem de tipos
 cd backend && npm run typecheck && npm test -- --run
 cd frontend && npm run typecheck && npm run build
+
+# 4. Executar bateria de testes de carga e concorrência (RNF2, RNF3)
+cd backend && npm run test:load
+# Ou via k6:
+# k6 run backend/scripts/load-test.k6.js
 ```

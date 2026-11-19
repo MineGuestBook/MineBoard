@@ -84,7 +84,7 @@ function resolveApiBase(): string {
   const host = window.location.hostname.toLowerCase();
   if (host.endsWith('.pages.dev')) {
     return host.includes('-prod')
-      ? `https://preview-prod.${CONFIGURED_ROOT_DOMAIN}`
+      ? `https://prod.${CONFIGURED_ROOT_DOMAIN}`
       : `https://dev.${CONFIGURED_ROOT_DOMAIN}`;
   }
   return '';
